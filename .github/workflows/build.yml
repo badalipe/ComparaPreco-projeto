@@ -23,8 +23,8 @@ jobs:
           CF_USER: ${{ secrets.CF_USER }}
           CF_PASS: ${{ secrets.CF_PASS }}
           APP_PIN: ${{ secrets.APP_PIN }}
-        run: gradle -p ComparaPreco assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: ComparaPreco-debug
-          path: ComparaPreco/app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/*.apk
