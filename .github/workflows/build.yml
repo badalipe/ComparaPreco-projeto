@@ -11,18 +11,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Descompactar o projeto
-        run: unzip -o ComparaPreco-projeto.zip
       - name: Aceitar licenças do Android SDK
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
       - name: Compilar
-        env:
-          CF_USER: ${{ secrets.CF_USER }}
-          CF_PASS: ${{ secrets.CF_PASS }}
-          APP_PIN: ${{ secrets.APP_PIN }}
         run: gradle assembleDebug --stacktrace
       - uses: actions/upload-artifact@v4
         with:
