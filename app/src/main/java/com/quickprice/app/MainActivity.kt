@@ -258,6 +258,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    /** Limpa a descrição que vem do sistema: remove "Familia:", "UN UN", traços soltos. */
+    private fun limparDescricao(d: String): String {
+        var s = Regex("\\s*[-|]\\s*Familia:.*$").replace(d, "")
+        s = Regex("\\s+").replace(s, " ").trim()
+        s = Regex("\\b(UN|KG|G|GR|ML|L|LT|CX|PCT|PT|UNID)\\s+(UN|KG|G|GR|ML|L|LT|CX|PCT|PT|UNID)\\b")
+            .replace(s) { m -> m.groupValues[1] }
+        s = Regex("\\s*-\\s*UN$", RegexOption.IGNORE_CASE).replace(s, "")
+        s = Regex("\\s*-\\s*$").replace(s, "")
+        return s.trim()
+    }
+
+    /** Formata bonito: primeira letra de cada palavra em maiúsculo. */
+    private fun bonito(d: String): String =
+        d.lowercase().split(" ").joinToString(" ") { p ->
+            if (p.length <= 2 && p !in listOf("kg", "ml", "cx")) p
+            else p.replaceFirstChar { it.uppercase() }
+        }
+
     /** Verifica se o preço atual caiu frente ao histórico; retorna o aviso ou vazio. */
     private fun alertaQueda(codigo: String, mercado: String, precoAtual: BigDecimal): String {
         val anteriores = historicoStore.historico(codigo, mercado)
@@ -365,10 +384,11 @@ class MainActivity : AppCompatActivity() {
         val precoValA = okA?.price?.amount
         val precoValB = okB?.price?.amount
 
-        txtCodigo.text = "${okA?.product?.code ?: okB?.product?.code ?: "-"} · $codigo"
-        txtProduto.text = okA?.product?.description
-            ?: okB?.product?.description
-            ?: "Produto não encontrado nos mercados."
+        val codProduto = okA?.product?.code ?: okB?.product?.code ?: "-"
+        txtCodigo.text = if (codProduto == codigo) codigo else "$codProduto · $codigo"
+        txtProduto.text = bonito(limparDescricao(
+            okA?.product?.description ?: okB?.product?.description
+                ?: "Produto não encontrado nos mercados."))
 
         // Ordena: o MENOR preço sempre fica em cima.
         data class Item(val nome: String, val precoTxt: String, val valor: BigDecimal?)
@@ -537,31 +557,35 @@ class MainActivity : AppCompatActivity() {
         val limpa = limparPraBusca(descricao)
         if (limpa.length < 4) return null
         return try {
-            val resp = org.jsoup.Jsoup.connect("https://world.openfoodfacts.org/cgi/search.pl")
-                .data("search_terms", limpa)
-                .data("search_simple", "1")
-                .data("action", "process")
-                .data("json", "1")
-                .data("page_size", "5")
+            val url = "https://world.openfoodfacts.org/cgi/search.pl?search_terms=" +
+                java.net.URLEncoder.encode(limpa, "UTF-8") +
+                "&search_simple=1&action=process&json=1&page_size=5"
+            val resp = org.jsoup.Jsoup.connect(url)
                 .userAgent("ComparaPreco/2.0 (consulta de precos pessoal)")
                 .timeout(9000)
                 .ignoreContentType(true)
                 .execute()
             val arr = org.json.JSONObject(resp.body()).optJSONArray("products") ?: return null
-            val tokens = limpa.lowercase()
-                .split(Regex("[^a-z0-9à-ú]+")).filter { it.length >= 3 }
+            // tokens só com letras (sem tamanhos tipo "170g"), sem acentos
+            val tokens = semAcentos(limpa).lowercase()
+                .split(Regex("[^a-z]+")).filter { it.length >= 3 }
             for (i in 0 until arr.length()) {
                 val p = arr.getJSONObject(i)
                 val nome = p.optString("product_name")
                 val img = p.optString("image_front_url")
                 if (nome.isEmpty() || img.isEmpty()) continue
-                val nomeLow = nome.lowercase()
-                val acertos = tokens.count { it in nomeLow }
-                if (tokens.isNotEmpty() && acertos.toDouble() / tokens.size >= 0.5) return img
+                val nomeNorm = semAcentos(nome).lowercase()
+                val acertos = tokens.count { it in nomeNorm }
+                if (tokens.isNotEmpty() && acertos.toDouble() / tokens.size >= 0.4) return img
             }
             null
         } catch (e: Exception) { null }
     }
+
+    /** Remove acentos pra comparar nomes (nestle = nestlé). */
+    private fun semAcentos(s: String): String =
+        java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
 
     private fun limparPraBusca(d: String): String {
         var s = Regex("\\s*[-|]\\s*Familia:.*$").replace(d, "")
