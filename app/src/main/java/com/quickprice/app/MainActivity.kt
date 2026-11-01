@@ -62,6 +62,12 @@ class MainActivity : AppCompatActivity() {
     private var ultimoItem: ItemLista? = null
     @Volatile private var ultimaImagem: String? = null
 
+    // Anti-disparo-duplo da busca
+    private var ultimaConsulta = ""
+    private var ultimaConsultaHora = 0L
+    // EAN aprendido por código interno (foto funciona mesmo buscando pelo código do mercado)
+    private lateinit var eanCache: MutableMap<String, String>
+
     @Volatile private var clientA: CartazFacilClient? = null
     @Volatile private var clientB: CartazFacilClient? = null
     @Volatile private var busyLogin = false
@@ -77,6 +83,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
         store = MarketStore(this)
+        eanCache = carregarEanCache()
         userAgent = WebSettings.getDefaultUserAgent(applicationContext)
         soundPool = SoundPool.Builder()
             .setMaxStreams(1)
@@ -191,6 +198,11 @@ class MainActivity : AppCompatActivity() {
     private fun consultar(codigo: String) {
         val limpo = codigo.trim()
         if (limpo.isEmpty()) return
+        // Alguns teclados disparam ENTER + "pesquisar" juntos; ignora o duplo
+        val agora = System.currentTimeMillis()
+        if (limpo == ultimaConsulta && agora - ultimaConsultaHora < 1200) return
+        ultimaConsulta = limpo
+        ultimaConsultaHora = agora
         if (!limpo.all { it.isDigit() }) { pesquisarPorNome(limpo); return }
         val ca = clientA
         val cb = clientB
@@ -308,6 +320,7 @@ class MainActivity : AppCompatActivity() {
             .setView(scroll)
             .setNegativeButton("Cancelar", null)
             .create()
+        dialog.setCanceledOnTouchOutside(false) // digitar no campo não fecha mais a janela
 
         achados.entries.take(25).forEach { (codigo, descricao) ->
             val tv = TextView(this)
@@ -452,7 +465,14 @@ class MainActivity : AppCompatActivity() {
             if (precoValA != null) cestaA += precoValA.toDouble()
             if (precoValB != null) cestaB += precoValB.toDouble()
             atualizarCesta()
-            buscarImagemProduto(codigo, descHist)
+            // Aprende o EAN dos códigos internos (foto funciona ao buscar pelo código do mercado)
+            if (eanValido(codigo)) {
+                okA?.product?.code?.let { eanCache[it] = codigo }
+                okB?.product?.code?.let { eanCache[it] = codigo }
+                salvarEanCache()
+            }
+            val eanImagem = if (eanValido(codigo)) codigo else eanCache[codProduto] ?: codigo
+            buscarImagemProduto(eanImagem, descHist)
         }
 
 
@@ -530,7 +550,7 @@ class MainActivity : AppCompatActivity() {
                     if (pct >= 3.0) {
                         ofertas.add(
                             "\uD83D\uDD25 " + lista.first().descricao + "\n" +
-                                "   " + lista.first().mercado + " \u2014 " +
+                                "   " + lista.first().mercado + " — " +
                                 moeda(menorHoje) + " (-" +
                                 String.format(Locale("pt", "BR"), "%.0f", pct) + "%)"
                         )
@@ -549,6 +569,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun atualizarBadgeLista() {
         btnLista.text = "🛒 Lista (${listaStore.tamanho()})"
+    }
+
+    /** EAN válido tem 8 a 14 dígitos (EAN-8, UPC-A, EAN-13/14). */
+    private fun eanValido(s: String) = s.length in 8..14 && s.all { it.isDigit() }
+
+    /** Cache EAN aprendido por código interno (gravado no aparelho). */
+    private fun carregarEanCache(): MutableMap<String, String> {
+        val prefs = getSharedPreferences("ean_cache", MODE_PRIVATE)
+        val mapa = mutableMapOf<String, String>()
+        prefs.all.forEach { (k, v) -> if (v is String) mapa[k] = v as String }
+        return mapa
+    }
+
+    private fun salvarEanCache() {
+        val ed = getSharedPreferences("ean_cache", MODE_PRIVATE).edit()
+        ed.clear()
+        eanCache.forEach { (k, v) -> ed.putString(k, v) }
+        ed.apply()
     }
 
     /** Busca a foto no Open Food Facts pelo NOME do produto (busca por voz/texto).
