@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ComparaPreco" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#2563EB</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#1E40AF</item>
+        <item name="colorOnPrimaryContainer">#FFFFFF</item>
+        <item name="colorSecondary">#0E7490</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="android:statusBarColor">#0A0F1F</item>
+        <item name="android:navigationBarColor">#0A0F1F</item>
+    </style>
+</resources>
