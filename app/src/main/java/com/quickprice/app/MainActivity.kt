@@ -467,12 +467,24 @@ class MainActivity : AppCompatActivity() {
             atualizarCesta()
             // Aprende o EAN dos códigos internos (foto funciona ao buscar pelo código do mercado)
             if (eanValido(codigo)) {
-                okA?.product?.code?.let { eanCache[it] = codigo }
-                okB?.product?.code?.let { eanCache[it] = codigo }
+                okA?.product?.code?.let { eanCache["E:$it"] = codigo }
+                okB?.product?.code?.let { eanCache["E:$it"] = codigo }
                 salvarEanCache()
             }
-            val eanImagem = if (eanValido(codigo)) codigo else eanCache[codProduto] ?: codigo
-            buscarImagemProduto(eanImagem, descHist)
+            // Foto prioriza: imagem já aprendida por descrição > EAN digitado > EAN aprendido > busca por nome
+            val normA = okA?.product?.description?.let { normDesc(it) }
+            val normB = okB?.product?.description?.let { normDesc(it) }
+            val imgAprendida = normA?.let { eanCache["I:$it"] }
+                ?: normB?.let { eanCache["I:$it"] }
+            val eanImagem = when {
+                eanValido(codigo) -> codigo
+                else -> eanCache["E:$codProduto"]
+                    ?: normA?.let { eanCache["N:$it"] }
+                    ?: normB?.let { eanCache["N:$it"] }
+                    ?: codigo
+            }
+            if (imgAprendida != null) mostrarImagem(imgAprendida)
+            else buscarImagemProduto(eanImagem, descHist)
         }
 
 
@@ -574,6 +586,15 @@ class MainActivity : AppCompatActivity() {
     /** EAN válido tem 8 a 14 dígitos (EAN-8, UPC-A, EAN-13/14). */
     private fun eanValido(s: String) = s.length in 8..14 && s.all { it.isDigit() }
 
+    /** Descrição normalizada: limpa, tira stopwords e ORDENA os tokens
+     *  (assim "Sagu Yoki Uva 250g" = "Sagu Yoki 250g Uva", de mercados diferentes). */
+    private fun normDesc(d: String): String =
+        limparDescricao(d).lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.isNotEmpty() && it !in listOf("un", "unid", "familia") }
+            .sorted()
+            .joinToString(" ")
+
     /** Cache EAN aprendido por código interno (gravado no aparelho). */
     private fun carregarEanCache(): MutableMap<String, String> {
         val prefs = getSharedPreferences("ean_cache", MODE_PRIVATE)
@@ -594,9 +615,19 @@ class MainActivity : AppCompatActivity() {
     private fun buscarImagemPorNome(descricao: String): String? {
         val limpa = limparPraBusca(descricao)
         if (limpa.length < 4) return null
+        // tokens só com letras (sem tamanhos tipo "170g"), sem acentos
+        val tokens = semAcentos(limpa).lowercase()
+            .split(Regex("[^a-z]+")).filter { it.length >= 3 }
+        if (tokens.isEmpty()) return null
+        // 1ª tentativa com todos os termos; se não achar, 2ª com só os 3 principais
+        return buscarOff(tokens) ?: buscarOff(tokens.take(3))
+    }
+
+    /** Consulta o Open Food Facts e devolve a foto do MELHOR match (>= metade dos termos). */
+    private fun buscarOff(tokens: List<String>): String? {
         return try {
             val url = "https://world.openfoodfacts.org/cgi/search.pl?search_terms=" +
-                java.net.URLEncoder.encode(limpa, "UTF-8") +
+                java.net.URLEncoder.encode(tokens.joinToString(" "), "UTF-8") +
                 "&search_simple=1&action=process&json=1&page_size=5"
             val resp = org.jsoup.Jsoup.connect(url)
                 .userAgent("ComparaPreco/2.0 (consulta de precos pessoal)")
@@ -604,19 +635,18 @@ class MainActivity : AppCompatActivity() {
                 .ignoreContentType(true)
                 .execute()
             val arr = org.json.JSONObject(resp.body()).optJSONArray("products") ?: return null
-            // tokens só com letras (sem tamanhos tipo "170g"), sem acentos
-            val tokens = semAcentos(limpa).lowercase()
-                .split(Regex("[^a-z]+")).filter { it.length >= 3 }
+            var melhorUrl: String? = null
+            var melhorScore = 0.0
             for (i in 0 until arr.length()) {
                 val p = arr.getJSONObject(i)
                 val nome = p.optString("product_name")
                 val img = p.optString("image_front_url")
                 if (nome.isEmpty() || img.isEmpty()) continue
                 val nomeNorm = semAcentos(nome).lowercase()
-                val acertos = tokens.count { it in nomeNorm }
-                if (tokens.isNotEmpty() && acertos.toDouble() / tokens.size >= 0.4) return img
+                val score = tokens.count { it in nomeNorm }.toDouble() / tokens.size
+                if (score > melhorScore) { melhorScore = score; melhorUrl = img }
             }
-            null
+            if (melhorScore >= 0.5) melhorUrl else null
         } catch (e: Exception) { null }
     }
 
@@ -679,6 +709,15 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     Log.e("MainActivity", "Erro ao buscar imagem: ${e.message}")
                     null
+                }
+            }
+            // Aprende: descrição normalizada -> EAN + URL da foto (vale p/ código interno e nome)
+            if (imageUrl != null && eanValido(codigoBarras)) {
+                val norm = normDesc(descricao)
+                if (norm.isNotEmpty()) {
+                    eanCache["N:$norm"] = codigoBarras
+                    eanCache["I:$norm"] = imageUrl
+                    salvarEanCache()
                 }
             }
             runOnUiThread { if (token == imagemToken) mostrarImagem(imageUrl) }
