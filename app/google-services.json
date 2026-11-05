@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "705734648480",
+    "project_id": "comparapreco-bd517",
+    "storage_bucket": "comparapreco-bd517.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:70573464848ad:4f8a5c97cb5e0acd6d5fc5",
+        "android_client_info": {
+          "package_name": "com.comparapreco.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDR5kZrLEP5XAvViGl52_trSXLGnyyJJKg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
