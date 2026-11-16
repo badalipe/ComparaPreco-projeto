@@ -11,7 +11,7 @@ import android.graphics.Shader
 import com.bumptech.glide.load.Transformation
 import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
-import com.bumptech.glide.load.resource.bitmap.CenterCrop
+import com.bumptech.glide.load.resource.bitmap.CenterInside
 import com.bumptech.glide.load.MultiTransformation
 import java.security.MessageDigest
 
@@ -108,10 +108,11 @@ class NetflixEdgeTransformation(
     companion object {
         private const val ID = "com.quickprice.app.NetflixEdgeTransformation.v2"
 
-        /** CenterCrop + degradê nas bordas (CenterCrop precisa vir junto porque
-         *  o Glide ignora o scaleType do ImageView quando há transform manual). */
+        /** CenterInside + degradê nas bordas para preservar a foto inteira.
+         *  A transformação explícita é necessária porque o Glide ignora o
+         *  scaleType do ImageView quando há transform manual. */
         @JvmStatic
         fun getTransformation(): Transformation<Bitmap> =
-            MultiTransformation(CenterCrop(), NetflixEdgeTransformation())
+            MultiTransformation(CenterInside(), NetflixEdgeTransformation())
     }
 }
