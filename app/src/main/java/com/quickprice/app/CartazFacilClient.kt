@@ -8,13 +8,15 @@ import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
 import java.util.Locale
 import org.jsoup.Jsoup
 
 internal data class PriceLookupResult(
     val barcode: String,
     val product: CartazProduct,
-    val price: CartazPrice
+    val price: CartazPrice,
+    val matchedByDescription: Boolean = false
 )
 
 internal open class CartazFacilException(message: String) : Exception(message)
@@ -22,7 +24,10 @@ internal open class CartazLoginException(message: String) : CartazFacilException
 /** Usuário/senha recusados pelo site (só nesse caso a senha salva deve ser apagada). */
 internal class CartazBadCredentialsException(message: String) : CartazLoginException(message)
 internal class ProductNotFoundException : CartazFacilException("Produto não encontrado.")
-internal class AmbiguousProductException(val products: List<CartazProduct>) :
+internal class AmbiguousProductException(
+    val products: List<CartazProduct>,
+    val searchWasByName: Boolean = false
+) :
     CartazFacilException("O código encontrou mais de um produto.")
 internal class PriceNotFoundException : CartazFacilException("O produto foi encontrado, mas não há valor disponível.")
 
@@ -125,20 +130,70 @@ internal class CartazFacilClient(
     }
 
     @Synchronized
-    fun lookupPriceForProduct(barcode: String, product: CartazProduct): PriceLookupResult {
+    fun lookupPriceForProduct(
+        barcode: String,
+        product: CartazProduct,
+        matchedByDescription: Boolean = false
+    ): PriceLookupResult {
         if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
         val cleanBarcode = barcode.trim()
         if (cleanBarcode.isEmpty()) throw CartazFacilException("O leitor não retornou um código de barras.")
-        return consultarPreco(cleanBarcode, product)
+        return consultarPreco(cleanBarcode, product, matchedByDescription)
     }
 
-    private fun consultarPreco(cleanBarcode: String, product: CartazProduct): PriceLookupResult {
+    /** Fallback: reúne candidatos pelo nome conhecido no outro mercado quando o EAN não existe. */
+    @Synchronized
+    fun searchProductsByDescription(expectedDescription: String): List<CartazProduct> {
+        if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
+
+        val cleanDescription = expectedDescription
+            .replace(Regex("(?i)\\s*[-|]\\s*(?:un\\s+)?familia.*$"), "")
+            .trim()
+        val tokens = cleanDescription.split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter { it.length > 1 && normalizeDescription(it) !in NAME_STOP_WORDS }
+        val searchTerms = listOf(
+            cleanDescription,
+            tokens.take(4).joinToString(" ")
+        ).map { it.trim() }.filter { it.length >= 3 }.distinct()
+
+        val found = linkedMapOf<String, CartazProduct>()
+        for (term in searchTerms) {
+            val matches = searchProducts(term)
+            matches.forEach { found[it.id] = it }
+        }
+        if (found.isEmpty()) throw ProductNotFoundException()
+
+        val expectedTokens = descriptionTokens(cleanDescription)
+        return found.values.map { product ->
+            product to descriptionSimilarity(expectedTokens, descriptionTokens(product.description))
+        }.sortedByDescending { it.second }.map { it.first }
+    }
+
+    private fun consultarPreco(
+        cleanBarcode: String,
+        product: CartazProduct,
+        matchedByDescription: Boolean = false
+    ): PriceLookupResult {
         val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
         val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
         requireAuthenticatedResponse(values)
         val prices = CartazFacilHtmlParser.parsePrices(values.body)
         val price = prices.firstOrNull() ?: throw PriceNotFoundException()
-        return PriceLookupResult(cleanBarcode, product, price)
+        return PriceLookupResult(cleanBarcode, product, price, matchedByDescription)
+    }
+
+    private fun descriptionTokens(text: String): Set<String> = normalizeDescription(text)
+        .split(Regex("[^a-z0-9]+"))
+        .filter { it.length > 1 && it !in NAME_STOP_WORDS }
+        .toSet()
+
+    private fun normalizeDescription(text: String): String = Normalizer.normalize(text, Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+
+    private fun descriptionSimilarity(expected: Set<String>, candidate: Set<String>): Double {
+        if (expected.isEmpty() || candidate.isEmpty()) return 0.0
+        return expected.intersect(candidate).size.toDouble() / maxOf(expected.size, candidate.size)
     }
 
     /** Expande UPC-E (8 dígitos) para UPC-A preservando o dígito verificador. */
@@ -290,5 +345,6 @@ internal class CartazFacilClient(
         private const val BASE_URL = "https://rmarket.cartazfacil.pro"
         private const val TIMEOUT_MS = 8_000
         private const val MAX_REDIRECTS = 5
+        private val NAME_STOP_WORDS = setOf("de", "do", "da", "dos", "das", "com", "un", "familia", "trad", "tradicional")
     }
 }

@@ -348,23 +348,47 @@ class MainActivity : AppCompatActivity() {
         if (idConsulta != consultaToken || isFinishing || isDestroyed) return
         val ambiguoA = resA?.exceptionOrNull() as? AmbiguousProductException
         val ambiguoB = resB?.exceptionOrNull() as? AmbiguousProductException
+        val produtoA = resA?.getOrNull()
+        val produtoB = resB?.getOrNull()
         when {
             ambiguoA != null -> mostrarEscolhaAmbigua(
                 store.mercadoA().nome, ambiguoA.products, idConsulta,
+                ambiguoA.searchWasByName,
                 aoCancelar = { mostrarResultado(codigo, resA, resB) }
             ) { escolhido ->
-                consultarProdutoEscolhido(codigo, clientA, store.mercadoA(), escolhido, idConsulta) { resultado ->
+                consultarProdutoEscolhido(
+                    codigo, clientA, store.mercadoA(), escolhido, ambiguoA.searchWasByName, idConsulta
+                ) { resultado ->
                     resolverAmbiguidades(codigo, resultado, resB, idConsulta)
                 }
             }
             ambiguoB != null -> mostrarEscolhaAmbigua(
                 store.mercadoB().nome, ambiguoB.products, idConsulta,
+                ambiguoB.searchWasByName,
                 aoCancelar = { mostrarResultado(codigo, resA, resB) }
             ) { escolhido ->
-                consultarProdutoEscolhido(codigo, clientB, store.mercadoB(), escolhido, idConsulta) { resultado ->
+                consultarProdutoEscolhido(
+                    codigo, clientB, store.mercadoB(), escolhido, ambiguoB.searchWasByName, idConsulta
+                ) { resultado ->
                     resolverAmbiguidades(codigo, resA, resultado, idConsulta)
                 }
             }
+            resA?.exceptionOrNull() is ProductNotFoundException && produtoB != null ->
+                buscarFallbackDescricao(codigo, clientA, store.mercadoA(), produtoB.product.description, idConsulta) { fallback ->
+                    if (fallback.exceptionOrNull() is AmbiguousProductException) {
+                        resolverAmbiguidades(codigo, fallback, resB, idConsulta)
+                    } else {
+                        mostrarResultado(codigo, fallback, resB)
+                    }
+                }
+            resB?.exceptionOrNull() is ProductNotFoundException && produtoA != null ->
+                buscarFallbackDescricao(codigo, clientB, store.mercadoB(), produtoA.product.description, idConsulta) { fallback ->
+                    if (fallback.exceptionOrNull() is AmbiguousProductException) {
+                        resolverAmbiguidades(codigo, resA, fallback, idConsulta)
+                    } else {
+                        mostrarResultado(codigo, resA, fallback)
+                    }
+                }
             else -> mostrarResultado(codigo, resA, resB)
         }
     }
@@ -373,6 +397,7 @@ class MainActivity : AppCompatActivity() {
         mercado: String,
         candidatos: List<CartazProduct>,
         idConsulta: Int,
+        porDescricao: Boolean,
         aoCancelar: () -> Unit,
         aoEscolher: (CartazProduct) -> Unit
     ) {
@@ -380,7 +405,7 @@ class MainActivity : AppCompatActivity() {
         var resolvido = false
         val linhas = lista.map { "${it.description}\nCód. ${it.code}" }.toTypedArray()
         val dialogo = AlertDialog.Builder(this)
-            .setTitle("Escolha o produto no $mercado (${lista.size})")
+            .setTitle("${if (porDescricao) "Confirme" else "Escolha"} no $mercado (${lista.size})")
             .setItems(linhas) { _, indice ->
                 if (idConsulta == consultaToken && indice in lista.indices) {
                     resolvido = true
@@ -395,7 +420,11 @@ class MainActivity : AppCompatActivity() {
                 aoCancelar()
             }
         }
-        txtStatus.text = "O $mercado retornou vários itens para este código. Escolha o correto para comparar."
+        txtStatus.text = if (porDescricao) {
+            "EAN não localizado em $mercado. Confirme marca, tipo e tamanho; a busca foi pelo nome."
+        } else {
+            "O $mercado retornou vários itens para este código. Escolha o correto para comparar."
+        }
         dialogo.show()
     }
 
@@ -404,12 +433,32 @@ class MainActivity : AppCompatActivity() {
         client: CartazFacilClient?,
         mercado: MercadoConfig,
         produto: CartazProduct,
+        porDescricao: Boolean,
         idConsulta: Int,
         aoConcluir: (Result<PriceLookupResult>) -> Unit
     ) {
         txtStatus.text = "Consultando ${produto.description} em ${mercado.nome}..."
         pool.execute {
-            val resultado = consultarSeguro(client, mercado, codigo, produto)
+            val resultado = consultarSeguro(client, mercado, codigo, produto, porDescricao)
+            runOnUiThread {
+                if (idConsulta == consultaToken && !isFinishing && !isDestroyed) aoConcluir(resultado)
+            }
+        }
+    }
+
+    private fun buscarFallbackDescricao(
+        codigo: String,
+        client: CartazFacilClient?,
+        mercado: MercadoConfig,
+        descricaoEsperada: String,
+        idConsulta: Int,
+        aoConcluir: (Result<PriceLookupResult>) -> Unit
+    ) {
+        txtStatus.text = "EAN não localizado em ${mercado.nome}; tentando pelo nome do produto..."
+        pool.execute {
+            val resultado = consultarSeguro(
+                client, mercado, codigo, descricaoFallback = descricaoEsperada
+            )
             runOnUiThread {
                 if (idConsulta == consultaToken && !isFinishing && !isDestroyed) aoConcluir(resultado)
             }
@@ -553,11 +602,18 @@ class MainActivity : AppCompatActivity() {
         client: CartazFacilClient?,
         cfg: MercadoConfig,
         codigo: String,
-        produtoSelecionado: CartazProduct? = null
+        produtoSelecionado: CartazProduct? = null,
+        matchedByDescription: Boolean = false,
+        descricaoFallback: String? = null
     ): Result<PriceLookupResult> {
         if (client == null) return Result.failure(RuntimeException("Mercado não conectado"))
-        fun executarConsulta() = if (produtoSelecionado == null) client.lookupPrice(codigo)
-            else client.lookupPriceForProduct(codigo, produtoSelecionado)
+        fun executarConsulta() = when {
+            produtoSelecionado != null -> client.lookupPriceForProduct(codigo, produtoSelecionado, matchedByDescription)
+            descricaoFallback != null -> throw AmbiguousProductException(
+                client.searchProductsByDescription(descricaoFallback), searchWasByName = true
+            )
+            else -> client.lookupPrice(codigo)
+        }
         val r1 = runCatching { executarConsulta() }
         val err = r1.exceptionOrNull()
         if (err is CartazLoginException) {
@@ -635,6 +691,10 @@ class MainActivity : AppCompatActivity() {
             precoValB != null -> "Sem preço em ${ma.nome}: ${erroCurto(resA)}."
             else -> "Sem preços — ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
         }
+        val correspondenciaPorDescricao = okA?.matchedByDescription == true || okB?.matchedByDescription == true
+        if (correspondenciaPorDescricao) {
+            txtDiff.append("\nPreço localizado por descrição; confira marca, tipo e tamanho do produto.")
+        }
 
         // Alerta de queda de preço (compara com o histórico local)
         val alertas = mutableListOf<String>()
@@ -710,12 +770,15 @@ class MainActivity : AppCompatActivity() {
         }
         btnSalvar.visibility = if (ultimoItem != null) View.VISIBLE else View.GONE
 
-        txtStatus.text = when {
+        val statusComparacao = when {
             okA != null && okB != null -> "Preço comparado nos dois mercados. Escaneie outro produto."
             okA != null -> "${ma.nome}: preço encontrado. ${mb.nome}: ${erroCurto(resB)}."
             okB != null -> "${mb.nome}: preço encontrado. ${ma.nome}: ${erroCurto(resA)}."
             else -> "Nenhum preço encontrado. ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
         }
+        txtStatus.text = if (correspondenciaPorDescricao) {
+            "$statusComparacao Um produto foi confirmado pelo nome, não diretamente pelo EAN."
+        } else statusComparacao
         btnScan.isEnabled = true
         btnAjustes.isEnabled = true
     }
@@ -1032,7 +1095,11 @@ class MainActivity : AppCompatActivity() {
         r == null -> "Mercado não conectado"
         r.getOrNull() != null -> "R$ ${r.getOrNull()!!.price.display}"
         r.exceptionOrNull() is ProductNotFoundException -> "Não encontrado"
-        r.exceptionOrNull() is AmbiguousProductException -> "Mais de um produto"
+        r.exceptionOrNull() is AmbiguousProductException -> {
+            val ambiguidade = r.exceptionOrNull() as AmbiguousProductException
+            if (ambiguidade.searchWasByName) "Confirmação por nome pendente"
+            else "Escolha entre ${ambiguidade.products.size} itens"
+        }
         r.exceptionOrNull() is PriceNotFoundException -> "Sem preço no mercado"
         r.exceptionOrNull() is CartazLoginException -> "Sessão expirou"
         else -> {
