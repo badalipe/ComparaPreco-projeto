@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnVoz: View
     private lateinit var listaStore: ListaComprasStore
     private lateinit var historicoStore: HistoricoStore
+    private lateinit var imageCache: ProductImageCache
     private var ultimoItem: ItemLista? = null
     @Volatile private var ultimaImagem: String? = null
 
@@ -90,6 +91,7 @@ class MainActivity : AppCompatActivity() {
         store = MarketStore(this)
         eanCache = carregarEanCache()
         userAgent = WebSettings.getDefaultUserAgent(applicationContext)
+        imageCache = ProductImageCache(applicationContext, userAgent)
         soundPool = SoundPool.Builder()
             .setMaxStreams(1)
             .setAudioAttributes(
@@ -939,41 +941,67 @@ class MainActivity : AppCompatActivity() {
         imagemDescricaoAtual = descricao
         imagemBuscaEmAndamento = true
         val eanValido = codigoBarras.length in 8..14 && codigoBarras.all { it.isDigit() }
-        if (eanValido) {
-            val imagemEmCache = eanCache["P:$codigoBarras"]
-            if (!imagemEmCache.isNullOrBlank()) {
-                imagemBuscaEmAndamento = false
-                mostrarImagem(imagemEmCache)
-                return
+
+        // Room consulta os metadados em background; os bytes reais são lidos de filesDir.
+        pool.execute {
+            val imagemLocal = runCatching { imageCache.findLocal(codigoBarras, descricao) }.getOrNull()
+            runOnUiThread {
+                if (token != imagemToken || isFinishing || isDestroyed) return@runOnUiThread
+                if (imagemLocal != null) {
+                    imagemBuscaEmAndamento = false
+                    mostrarImagem(imagemLocal.toURI().toString())
+                    return@runOnUiThread
+                }
+
+                // Compatibilidade com URLs guardadas por versões anteriores; promove-as a ficheiro local.
+                val imagemEmCache = if (eanValido) eanCache["P:$codigoBarras"] else null
+                if (!imagemEmCache.isNullOrBlank()) {
+                    imagemBuscaEmAndamento = false
+                    mostrarImagem(imagemEmCache)
+                    val ordemCache = imageCache.nextSelectionOrder()
+                    pool.execute {
+                        runCatching { imageCache.cacheRemote(codigoBarras, descricao, imagemEmCache, ordemCache) }
+                    }
+                    return@runOnUiThread
+                }
+                iniciarBuscaImagemRemota(token, codigoBarras, descricao, eanValido)
             }
         }
+    }
+
+    private fun iniciarBuscaImagemRemota(
+        token: Int,
+        codigoBarras: String,
+        descricao: String,
+        eanValido: Boolean
+    ) {
         if (!eanValido) {
             pool.execute {
                 val url = buscarImagemPorNome(descricao)
                 runOnUiThread {
                     if (token == imagemToken) {
                         imagemBuscaEmAndamento = false
+                        if (!url.isNullOrBlank()) guardarImagemAprendida(codigoBarras, descricao, url)
                         mostrarImagem(url)
                     }
                 }
             }
             return
         }
+
         val melhorImagem = java.util.concurrent.atomic.AtomicReference<String?>(null)
         val fontesConcluidas = java.util.concurrent.atomic.AtomicInteger(0)
-
         // Consultar as duas fontes em paralelo: a mais rápida pode mostrar a foto
         // sem esperar que a outra fonte lenta responda.
         val fontes = listOf(
             CompletableFuture.supplyAsync { buscarImagemOffPorEan(codigoBarras) },
             CompletableFuture.supplyAsync { buscarImagemBeepScan(codigoBarras) }
         )
+
         fontes.forEachIndexed { indice, future ->
             future.whenComplete { url, _ ->
                 if (!url.isNullOrBlank()) {
                     val deveMostrar = if (indice == 0) {
-                        // Open Food Facts é a fonte preferida; pode substituir um
-                        // resultado provisório do fallback quando chegar depois.
                         melhorImagem.set(url)
                         true
                     } else {
@@ -1026,6 +1054,8 @@ class MainActivity : AppCompatActivity() {
             eanCache["I:$norm"] = url
         }
         salvarEanCache()
+        val ordemCache = imageCache.nextSelectionOrder()
+        pool.execute { runCatching { imageCache.cacheRemote(codigoBarras, descricao, url, ordemCache) } }
     }
 
     private fun buscarImagemOffPorEan(codigoBarras: String): String? = try {
