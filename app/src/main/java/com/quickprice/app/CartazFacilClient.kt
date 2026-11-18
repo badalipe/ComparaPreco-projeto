@@ -4,6 +4,7 @@ import java.io.IOException
 import java.net.CookieManager
 import java.net.CookiePolicy
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -21,7 +22,8 @@ internal open class CartazLoginException(message: String) : CartazFacilException
 /** Usuário/senha recusados pelo site (só nesse caso a senha salva deve ser apagada). */
 internal class CartazBadCredentialsException(message: String) : CartazLoginException(message)
 internal class ProductNotFoundException : CartazFacilException("Produto não encontrado.")
-internal class AmbiguousProductException : CartazFacilException("O código encontrou mais de um produto. Confira no sistema.")
+internal class AmbiguousProductException(val products: List<CartazProduct>) :
+    CartazFacilException("O código encontrou mais de um produto.")
 internal class PriceNotFoundException : CartazFacilException("O produto foi encontrado, mas não há valor disponível.")
 
 internal class CartazFacilClient(
@@ -118,7 +120,19 @@ internal class CartazFacilClient(
         // Nunca associa um preço ao primeiro resultado aleatório da lista.
         val product = products.firstOrNull { it.code in searchTerms }
             ?: products.singleOrNull()
-            ?: throw AmbiguousProductException()
+            ?: throw AmbiguousProductException(products)
+        return consultarPreco(cleanBarcode, product)
+    }
+
+    @Synchronized
+    fun lookupPriceForProduct(barcode: String, product: CartazProduct): PriceLookupResult {
+        if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
+        val cleanBarcode = barcode.trim()
+        if (cleanBarcode.isEmpty()) throw CartazFacilException("O leitor não retornou um código de barras.")
+        return consultarPreco(cleanBarcode, product)
+    }
+
+    private fun consultarPreco(cleanBarcode: String, product: CartazProduct): PriceLookupResult {
         val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
         val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
         requireAuthenticatedResponse(values)
@@ -166,7 +180,8 @@ internal class CartazFacilClient(
         var currentBody = body
 
         repeat(MAX_REDIRECTS + 1) {
-            val url = URL(currentUrl)
+            val uri = safeUri(currentUrl)
+            val url = uri.toURL()
             val requestBody = currentBody
             val connection = (url.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
@@ -179,7 +194,7 @@ internal class CartazFacilClient(
                 if (!referer.isNullOrBlank()) setRequestProperty("Referer", referer)
                 if (ajax) setRequestProperty("X-Requested-With", "XMLHttpRequest")
 
-                cookieManager.get(url.toURI(), emptyMap()).forEach { (name, values) ->
+                cookieManager.get(uri, emptyMap()).forEach { (name, values) ->
                     if (name.equals("Cookie", ignoreCase = true) && values.isNotEmpty()) {
                         setRequestProperty("Cookie", values.joinToString("; "))
                     }
@@ -197,11 +212,11 @@ internal class CartazFacilClient(
             }
 
             val status = connection.responseCode
-            cookieManager.put(url.toURI(), connection.headerFields)
+            cookieManager.put(uri, connection.headerFields)
             if (status in 300..399) {
                 val location = connection.getHeaderField("Location")
                     ?: throw IOException("O sistema retornou uma resposta inválida.")
-                val nextUrl = URL(url, location)
+                val nextUrl = safeUri(URL(url, location).toExternalForm()).toURL()
                 val allowedHost = URL(baseUrl).host
                 if (!nextUrl.protocol.equals("https", ignoreCase = true) ||
                     !nextUrl.host.equals(allowedHost, ignoreCase = true)
@@ -230,6 +245,44 @@ internal class CartazFacilClient(
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
+
+    /** Alguns redirects do Cartaz Fácil incluem espaços/caracteres não escapados na query. */
+    private fun safeUri(value: String): URI {
+        val parsed = URL(value)
+        val escapedPath = escapeUriComponent(parsed.path, "/:@!$&'()*+,;=")
+        val escapedQuery = parsed.query?.let { escapeUriComponent(it, "/?:@!$&'()*+,;=") }
+        val escapedFragment = parsed.ref?.let { escapeUriComponent(it, "/?:@!$&'()*+,;=") }
+        val normalized = buildString {
+            append(parsed.protocol).append("://").append(parsed.authority).append(escapedPath)
+            if (escapedQuery != null) append('?').append(escapedQuery)
+            if (escapedFragment != null) append('#').append(escapedFragment)
+        }
+        return URI(normalized)
+    }
+
+    private fun escapeUriComponent(value: String, allowed: String): String {
+        val out = StringBuilder()
+        var i = 0
+        while (i < value.length) {
+            val cp = value.codePointAt(i)
+            val chars = String(Character.toChars(cp))
+            if (cp == '%'.code && i + 2 < value.length &&
+                value[i + 1].digitToIntOrNull(16) != null && value[i + 2].digitToIntOrNull(16) != null) {
+                out.append(value, i, i + 3)
+                i += 3
+                continue
+            }
+            if (cp < 128 && (chars[0].isLetterOrDigit() || chars[0] in "-._~" || chars[0] in allowed)) {
+                out.append(chars)
+            } else {
+                chars.toByteArray(StandardCharsets.UTF_8).forEach { byte ->
+                    out.append('%').append("%02X".format(byte.toInt() and 0xFF))
+                }
+            }
+            i += Character.charCount(cp)
+        }
+        return out.toString()
+    }
 
     private data class HttpResponse(val statusCode: Int, val finalUrl: String, val body: String)
 

@@ -303,6 +303,7 @@ class MainActivity : AppCompatActivity() {
         }
         txtStatus.text = "Consultando \"$limpo\" nos dois mercados..."
         btnScan.isEnabled = false
+        btnAjustes.isEnabled = false
         txtProduto.text = "Consultando..."
         precoA.text = "R$ -"
         precoB.text = "R$ -"
@@ -327,14 +328,92 @@ class MainActivity : AppCompatActivity() {
             .whenComplete { resultados, erro ->
                 runOnUiThread {
                     if (idConsulta != consultaToken || isFinishing || isDestroyed) return@runOnUiThread
-                    btnScan.isEnabled = true
                     if (erro != null || resultados == null) {
+                        btnScan.isEnabled = true
+                        btnAjustes.isEnabled = true
                         txtStatus.text = "Não foi possível consultar os mercados. Tente novamente."
                         return@runOnUiThread
                     }
-                    mostrarResultado(limpo, resultados.first, resultados.second)
+                    resolverAmbiguidades(limpo, resultados.first, resultados.second, idConsulta)
                 }
             }
+    }
+
+    private fun resolverAmbiguidades(
+        codigo: String,
+        resA: Result<PriceLookupResult>?,
+        resB: Result<PriceLookupResult>?,
+        idConsulta: Int
+    ) {
+        if (idConsulta != consultaToken || isFinishing || isDestroyed) return
+        val ambiguoA = resA?.exceptionOrNull() as? AmbiguousProductException
+        val ambiguoB = resB?.exceptionOrNull() as? AmbiguousProductException
+        when {
+            ambiguoA != null -> mostrarEscolhaAmbigua(
+                store.mercadoA().nome, ambiguoA.products, idConsulta,
+                aoCancelar = { mostrarResultado(codigo, resA, resB) }
+            ) { escolhido ->
+                consultarProdutoEscolhido(codigo, clientA, store.mercadoA(), escolhido, idConsulta) { resultado ->
+                    resolverAmbiguidades(codigo, resultado, resB, idConsulta)
+                }
+            }
+            ambiguoB != null -> mostrarEscolhaAmbigua(
+                store.mercadoB().nome, ambiguoB.products, idConsulta,
+                aoCancelar = { mostrarResultado(codigo, resA, resB) }
+            ) { escolhido ->
+                consultarProdutoEscolhido(codigo, clientB, store.mercadoB(), escolhido, idConsulta) { resultado ->
+                    resolverAmbiguidades(codigo, resA, resultado, idConsulta)
+                }
+            }
+            else -> mostrarResultado(codigo, resA, resB)
+        }
+    }
+
+    private fun mostrarEscolhaAmbigua(
+        mercado: String,
+        candidatos: List<CartazProduct>,
+        idConsulta: Int,
+        aoCancelar: () -> Unit,
+        aoEscolher: (CartazProduct) -> Unit
+    ) {
+        val lista = candidatos
+        var resolvido = false
+        val linhas = lista.map { "${it.description}\nCód. ${it.code}" }.toTypedArray()
+        val dialogo = AlertDialog.Builder(this)
+            .setTitle("Escolha o produto no $mercado (${lista.size})")
+            .setItems(linhas) { _, indice ->
+                if (idConsulta == consultaToken && indice in lista.indices) {
+                    resolvido = true
+                    aoEscolher(lista[indice])
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialogo.setCanceledOnTouchOutside(false)
+        dialogo.setOnDismissListener {
+            if (!resolvido && idConsulta == consultaToken) {
+                aoCancelar()
+            }
+        }
+        txtStatus.text = "O $mercado retornou vários itens para este código. Escolha o correto para comparar."
+        dialogo.show()
+    }
+
+    private fun consultarProdutoEscolhido(
+        codigo: String,
+        client: CartazFacilClient?,
+        mercado: MercadoConfig,
+        produto: CartazProduct,
+        idConsulta: Int,
+        aoConcluir: (Result<PriceLookupResult>) -> Unit
+    ) {
+        txtStatus.text = "Consultando ${produto.description} em ${mercado.nome}..."
+        pool.execute {
+            val resultado = consultarSeguro(client, mercado, codigo, produto)
+            runOnUiThread {
+                if (idConsulta == consultaToken && !isFinishing && !isDestroyed) aoConcluir(resultado)
+            }
+        }
     }
 
     /** Pesquisa por nome: consulta os dois mercados e mostra lista pra escolher o produto. */
@@ -470,13 +549,20 @@ class MainActivity : AppCompatActivity() {
      * Consulta com reconexão: se a sessão caiu (outro funcionário logou em outro PC),
      * faz login de novo e repete a consulta automaticamente.
      */
-    private fun consultarSeguro(client: CartazFacilClient?, cfg: MercadoConfig, codigo: String): Result<PriceLookupResult> {
+    private fun consultarSeguro(
+        client: CartazFacilClient?,
+        cfg: MercadoConfig,
+        codigo: String,
+        produtoSelecionado: CartazProduct? = null
+    ): Result<PriceLookupResult> {
         if (client == null) return Result.failure(RuntimeException("Mercado não conectado"))
-        val r1 = runCatching { client.lookupPrice(codigo) }
+        fun executarConsulta() = if (produtoSelecionado == null) client.lookupPrice(codigo)
+            else client.lookupPriceForProduct(codigo, produtoSelecionado)
+        val r1 = runCatching { executarConsulta() }
         val err = r1.exceptionOrNull()
         if (err is CartazLoginException) {
             val relogin = runCatching { client.login(cfg.usuario, cfg.senha) }
-            return if (relogin.isSuccess) runCatching { client.lookupPrice(codigo) } else r1
+            return if (relogin.isSuccess) runCatching { executarConsulta() } else r1
         }
 
         // Uma falha de rede/servidor não significa que o produto não exista.
@@ -490,7 +576,7 @@ class MainActivity : AppCompatActivity() {
             Thread.currentThread().interrupt()
             return r1
         }
-        return runCatching { client.lookupPrice(codigo) }
+        return runCatching { executarConsulta() }
     }
 
     private fun mostrarResultado(codigo: String, resA: Result<PriceLookupResult>?, resB: Result<PriceLookupResult>?) {
@@ -630,6 +716,8 @@ class MainActivity : AppCompatActivity() {
             okB != null -> "${mb.nome}: preço encontrado. ${ma.nome}: ${erroCurto(resA)}."
             else -> "Nenhum preço encontrado. ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
         }
+        btnScan.isEnabled = true
+        btnAjustes.isEnabled = true
     }
 
     private fun salvarNaLista() {
