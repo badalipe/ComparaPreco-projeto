@@ -32,6 +32,7 @@ internal class CartazFacilClient(
     private var authenticated = false
 
     @Throws(CartazFacilException::class)
+    @Synchronized
     fun login(username: String, password: String) {
         if (username.isBlank() || password.isBlank()) {
             throw CartazLoginException("Informe o usuário e a senha.")
@@ -77,6 +78,7 @@ internal class CartazFacilClient(
 
     @Throws(CartazFacilException::class)
     /** Busca produtos por código de barras ou nome (para a pesquisa por nome do app). */
+    @Synchronized
     fun searchProducts(term: String): List<CartazProduct> {
         if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
         val clean = term.trim()
@@ -87,26 +89,56 @@ internal class CartazFacilClient(
         return CartazFacilHtmlParser.parseProducts(search.body)
     }
 
+    @Synchronized
     fun lookupPrice(barcode: String): PriceLookupResult {
         if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
         val cleanBarcode = barcode.trim()
         if (cleanBarcode.isEmpty()) throw CartazFacilException("O leitor não retornou um código de barras.")
 
-        // A opção Todas Sessões usa uma sessão vazia na requisição que retorna os produtos.
-        val searchPath = "/inc/buscaProduto.php?buscaProd=${encode(cleanBarcode)}&sessao="
-        val search = request(searchPath, "POST", ByteArray(0), "$baseUrl/unitario.php", ajax = true)
-        requireAuthenticatedResponse(search)
-        val products = CartazFacilHtmlParser.parseProducts(search.body)
+        // Alguns cadastros guardam UPC-A como EAN-13 com zero inicial, ou o
+        // inverso. Tenta a representação alternativa antes de declarar ausência.
+        val searchTerms = when {
+            cleanBarcode.length == 12 -> listOf(cleanBarcode, "0$cleanBarcode")
+            cleanBarcode.length == 13 && cleanBarcode.startsWith('0') -> listOf(cleanBarcode, cleanBarcode.drop(1))
+            cleanBarcode.length == 8 -> listOfNotNull(cleanBarcode, expandUpcE(cleanBarcode))
+                .flatMap { code ->
+                    if (code.length == 13 && code.startsWith('0')) listOf(code, code.drop(1)) else listOf(code)
+                }
+            else -> listOf(cleanBarcode)
+        }.distinct()
+        var products = emptyList<CartazProduct>()
+        for (searchTerm in searchTerms) {
+            val searchPath = "/inc/buscaProduto.php?buscaProd=${encode(searchTerm)}&sessao="
+            val search = request(searchPath, "POST", ByteArray(0), "$baseUrl/unitario.php", ajax = true)
+            requireAuthenticatedResponse(search)
+            products = CartazFacilHtmlParser.parseProducts(search.body)
+            if (products.isNotEmpty()) break
+        }
         if (products.isEmpty()) throw ProductNotFoundException()
-        // Alguns servidores retornam variações/duplicatas do mesmo produto.
-        // Escolhe automaticamente: código exato primeiro, senão o primeiro da lista.
-        val product = products.firstOrNull { it.code == cleanBarcode } ?: products.first()
+        // Nunca associa um preço ao primeiro resultado aleatório da lista.
+        val product = products.firstOrNull { it.code in searchTerms }
+            ?: products.singleOrNull()
+            ?: throw AmbiguousProductException()
         val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
         val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
         requireAuthenticatedResponse(values)
         val prices = CartazFacilHtmlParser.parsePrices(values.body)
         val price = prices.firstOrNull() ?: throw PriceNotFoundException()
         return PriceLookupResult(cleanBarcode, product, price)
+    }
+
+    /** Expande UPC-E (8 dígitos) para UPC-A preservando o dígito verificador. */
+    private fun expandUpcE(code: String): String? {
+        if (code.length != 8 || !code.all { it.isDigit() } || code[0] !in '0'..'1') return null
+        val ns = code[0]
+        val digits = code.substring(1, 7)
+        val upcBody = when (digits[5]) {
+            '0', '1', '2' -> "$ns${digits[0]}${digits[1]}${digits[5]}0000${digits[2]}${digits[3]}${digits[4]}"
+            '3' -> "$ns${digits[0]}${digits[1]}${digits[2]}00000${digits[3]}${digits[4]}"
+            '4' -> "$ns${digits[0]}${digits[1]}${digits[2]}${digits[3]}00000${digits[4]}"
+            else -> "$ns${digits[0]}${digits[1]}${digits[2]}${digits[3]}${digits[4]}0000${digits[5]}"
+        }
+        return upcBody + code[7]
     }
 
     private fun requireAuthenticatedResponse(response: HttpResponse) {
