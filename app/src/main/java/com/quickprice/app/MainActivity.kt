@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.text.InputType
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -55,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnScan: View
     private lateinit var btnSalvar: View
     private lateinit var btnLista: Button
+    private lateinit var btnAjustes: Button
     private lateinit var btnVoz: View
     private lateinit var listaStore: ListaComprasStore
     private lateinit var historicoStore: HistoricoStore
@@ -135,6 +137,8 @@ class MainActivity : AppCompatActivity() {
 
         btnSalvar.setOnClickListener { salvarNaLista() }
         btnLista.setOnClickListener { startActivity(Intent(this, ListaActivity::class.java)) }
+        btnAjustes = findViewById(R.id.btnAjustes)
+        btnAjustes.setOnClickListener { mostrarAjustesMercados() }
         atualizarBadgeLista()
 
         // Botões flutuantes: cada um arrasta separadamente
@@ -176,6 +180,7 @@ class MainActivity : AppCompatActivity() {
         if (busyLogin) return
         busyLogin = true
         btnScan.isEnabled = false
+        btnAjustes.isEnabled = false
         val ma = store.mercadoA()
         val mb = store.mercadoB()
         txtStatus.text = "Conectando em ${ma.nome} e ${mb.nome}..."
@@ -187,14 +192,98 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 busyLogin = false
                 btnScan.isEnabled = true
+                btnAjustes.isEnabled = true
                 txtStatus.text = when {
                     clientA != null && clientB != null -> "Conectado nos dois mercados. Escaneie um produto."
-                    clientA != null -> "Só ${ma.nome} conectou. Verifique o login de ${mb.nome} em Ajustes."
-                    clientB != null -> "Só ${mb.nome} conectou. Verifique o login de ${ma.nome} em Ajustes."
-                    else -> "Nenhum mercado conectou. Toque em AJUSTES para conferir usuários e senhas."
+                    clientA != null -> "${ma.nome} conectado. ${mb.nome} falhou: ${mensagemFalha(b.exceptionOrNull())}. Confira Ajustes."
+                    clientB != null -> "${mb.nome} conectado. ${ma.nome} falhou: ${mensagemFalha(a.exceptionOrNull())}. Confira Ajustes."
+                    else -> "Nenhum mercado conectou. Confira conexão e credenciais em Ajustes."
                 }
             }
         }
+    }
+
+    private fun mostrarAjustesMercados() {
+        val atualA = store.mercadoA()
+        val atualB = store.mercadoB()
+        val conteudo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        conteudo.addView(TextView(this).apply {
+            text = "As credenciais são guardadas localmente neste aparelho."
+            textSize = 13f
+            setTextColor(0xFF64748B.toInt())
+        }, LinearLayout.LayoutParams(-1, -2))
+        fun adicionarCampo(rotulo: String, valor: String, senha: Boolean = false): EditText {
+            conteudo.addView(TextView(this).apply {
+                text = rotulo
+                textSize = 14f
+                setTextColor(0xFF334155.toInt())
+            }, LinearLayout.LayoutParams(-1, -2))
+            return EditText(this).apply {
+                setText(valor)
+                textSize = 16f
+                setSingleLine(true)
+                inputType = if (senha) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    else InputType.TYPE_CLASS_TEXT
+                hint = if (senha) "Senha" else "Usuário"
+                setSelectAllOnFocus(true)
+                conteudo.addView(this, LinearLayout.LayoutParams(-1, dp(50)).apply {
+                    bottomMargin = dp(8)
+                })
+            }
+        }
+        conteudo.addView(TextView(this).apply {
+            text = atualA.nome
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1D4ED8.toInt())
+        }, LinearLayout.LayoutParams(-1, -2))
+        val usuarioA = adicionarCampo("Usuário", atualA.usuario)
+        val senhaA = adicionarCampo("Senha", atualA.senha, senha = true)
+        conteudo.addView(TextView(this).apply {
+            text = atualB.nome
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1D4ED8.toInt())
+            setPadding(0, dp(8), 0, 0)
+        }, LinearLayout.LayoutParams(-1, -2))
+        val usuarioB = adicionarCampo("Usuário", atualB.usuario)
+        val senhaB = adicionarCampo("Senha", atualB.senha, senha = true)
+        val scroll = ScrollView(this).apply { addView(conteudo) }
+
+        val dialogo = AlertDialog.Builder(this)
+            .setTitle("Ajustes dos mercados")
+            .setView(scroll)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Guardar e reconectar", null)
+            .create()
+        dialogo.setOnShowListener {
+            dialogo.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val novoUsuarioA = usuarioA.text.toString().trim()
+                val novaSenhaA = senhaA.text.toString()
+                val novoUsuarioB = usuarioB.text.toString().trim()
+                val novaSenhaB = senhaB.text.toString()
+                if (novoUsuarioA.isBlank() || novaSenhaA.isBlank() ||
+                    novoUsuarioB.isBlank() || novaSenhaB.isBlank()) {
+                    Toast.makeText(this, "Preencha usuário e senha dos dois mercados.", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                store.salvarA(atualA.copy(usuario = novoUsuarioA, senha = novaSenhaA))
+                store.salvarB(atualB.copy(usuario = novoUsuarioB, senha = novaSenhaB))
+                clientA = null
+                clientB = null
+                dialogo.dismiss()
+                conectarTudo()
+            }
+        }
+        dialogo.show()
+    }
+
+    private fun mensagemFalha(erro: Throwable?): String {
+        val msg = erro?.message?.replace(Regex("\\s+"), " ")?.take(90)
+        return msg?.takeIf { it.isNotBlank() } ?: "falha de login ou conexão"
     }
 
     private fun consultar(codigo: String) {
@@ -454,9 +543,11 @@ class MainActivity : AppCompatActivity() {
                 val venc = if (precoValA <= precoValB) ma.nome else mb.nome
                 "Diferença de R$ ${fmt(dif)} — melhor preço: $venc"
             }
-            precoValA != null -> "Só ${ma.nome} tem este produto."
-            precoValB != null -> "Só ${mb.nome} tem este produto."
-            else -> "Preço indisponível nos dois mercados."
+            precoValA != null && resB?.exceptionOrNull() is ProductNotFoundException -> "Só ${ma.nome} encontrou este produto."
+            precoValB != null && resA?.exceptionOrNull() is ProductNotFoundException -> "Só ${mb.nome} encontrou este produto."
+            precoValA != null -> "Sem preço em ${mb.nome}: ${erroCurto(resB)}."
+            precoValB != null -> "Sem preço em ${ma.nome}: ${erroCurto(resA)}."
+            else -> "Sem preços — ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
         }
 
         // Alerta de queda de preço (compara com o histórico local)
@@ -533,7 +624,12 @@ class MainActivity : AppCompatActivity() {
         }
         btnSalvar.visibility = if (ultimoItem != null) View.VISIBLE else View.GONE
 
-        txtStatus.text = "Conectado nos dois mercados. Escaneie um produto."
+        txtStatus.text = when {
+            okA != null && okB != null -> "Preço comparado nos dois mercados. Escaneie outro produto."
+            okA != null -> "${ma.nome}: preço encontrado. ${mb.nome}: ${erroCurto(resB)}."
+            okB != null -> "${mb.nome}: preço encontrado. ${ma.nome}: ${erroCurto(resA)}."
+            else -> "Nenhum preço encontrado. ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
+        }
     }
 
     private fun salvarNaLista() {
@@ -849,6 +945,7 @@ class MainActivity : AppCompatActivity() {
         r.getOrNull() != null -> "R$ ${r.getOrNull()!!.price.display}"
         r.exceptionOrNull() is ProductNotFoundException -> "Não encontrado"
         r.exceptionOrNull() is AmbiguousProductException -> "Mais de um produto"
+        r.exceptionOrNull() is PriceNotFoundException -> "Sem preço no mercado"
         r.exceptionOrNull() is CartazLoginException -> "Sessão expirou"
         else -> {
             val msg = r.exceptionOrNull()?.message ?: "sem detalhes"
