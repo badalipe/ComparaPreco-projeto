@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.text.InputType
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -24,15 +25,14 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.bitmap.CenterCrop
+import java.io.IOException
 import java.math.BigDecimal
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
     private val pool = Executors.newFixedThreadPool(3)
-    private val keepAlive = Executors.newSingleThreadScheduledExecutor()
     private lateinit var store: MarketStore
     private lateinit var userAgent: String
 
@@ -56,9 +56,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnScan: View
     private lateinit var btnSalvar: View
     private lateinit var btnLista: Button
+    private lateinit var btnAjustes: Button
     private lateinit var btnVoz: View
     private lateinit var listaStore: ListaComprasStore
     private lateinit var historicoStore: HistoricoStore
+    private lateinit var imageCache: ProductImageCache
     private var ultimoItem: ItemLista? = null
     @Volatile private var ultimaImagem: String? = null
 
@@ -72,6 +74,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var clientB: CartazFacilClient? = null
     @Volatile private var busyLogin = false
     @Volatile private var imagemToken = 0
+    @Volatile private var imagemBuscaCodigo = ""
+    @Volatile private var imagemBuscaEmAndamento = false
+    @Volatile private var imagemDescricaoAtual = ""
+    private var consultaToken = 0
     private var soundPool: SoundPool? = null
     private var bipId = 0
     private var alertaId = 0
@@ -85,6 +91,7 @@ class MainActivity : AppCompatActivity() {
         store = MarketStore(this)
         eanCache = carregarEanCache()
         userAgent = WebSettings.getDefaultUserAgent(applicationContext)
+        imageCache = ProductImageCache(applicationContext, userAgent)
         soundPool = SoundPool.Builder()
             .setMaxStreams(1)
             .setAudioAttributes(
@@ -132,6 +139,8 @@ class MainActivity : AppCompatActivity() {
 
         btnSalvar.setOnClickListener { salvarNaLista() }
         btnLista.setOnClickListener { startActivity(Intent(this, ListaActivity::class.java)) }
+        btnAjustes = findViewById(R.id.btnAjustes)
+        btnAjustes.setOnClickListener { mostrarAjustesMercados() }
         atualizarBadgeLista()
 
         // Botões flutuantes: cada um arrasta separadamente
@@ -154,7 +163,6 @@ class MainActivity : AppCompatActivity() {
         aplicarLogo(logoA, ma.baseUrl)
         aplicarLogo(logoB, mb.baseUrl)
         conectarTudo()
-        iniciarKeepAlive()
         verificarOfertasDoDia()
     }
 
@@ -174,6 +182,7 @@ class MainActivity : AppCompatActivity() {
         if (busyLogin) return
         busyLogin = true
         btnScan.isEnabled = false
+        btnAjustes.isEnabled = false
         val ma = store.mercadoA()
         val mb = store.mercadoB()
         txtStatus.text = "Conectando em ${ma.nome} e ${mb.nome}..."
@@ -185,17 +194,101 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 busyLogin = false
                 btnScan.isEnabled = true
+                btnAjustes.isEnabled = true
                 txtStatus.text = when {
                     clientA != null && clientB != null -> "Conectado nos dois mercados. Escaneie um produto."
-                    clientA != null -> "Só ${ma.nome} conectou. Verifique o login de ${mb.nome} em Ajustes."
-                    clientB != null -> "Só ${mb.nome} conectou. Verifique o login de ${ma.nome} em Ajustes."
-                    else -> "Nenhum mercado conectou. Toque em AJUSTES para conferir usuários e senhas."
+                    clientA != null -> "${ma.nome} conectado. ${mb.nome} falhou: ${mensagemFalha(b.exceptionOrNull())}. Confira Ajustes."
+                    clientB != null -> "${mb.nome} conectado. ${ma.nome} falhou: ${mensagemFalha(a.exceptionOrNull())}. Confira Ajustes."
+                    else -> "Nenhum mercado conectou. Confira conexão e credenciais em Ajustes."
                 }
             }
         }
     }
 
-    private fun consultar(codigo: String) {
+    private fun mostrarAjustesMercados() {
+        val atualA = store.mercadoA()
+        val atualB = store.mercadoB()
+        val conteudo = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        conteudo.addView(TextView(this).apply {
+            text = "As credenciais são guardadas localmente neste aparelho."
+            textSize = 13f
+            setTextColor(0xFF64748B.toInt())
+        }, LinearLayout.LayoutParams(-1, -2))
+        fun adicionarCampo(rotulo: String, valor: String, senha: Boolean = false): EditText {
+            conteudo.addView(TextView(this).apply {
+                text = rotulo
+                textSize = 14f
+                setTextColor(0xFF334155.toInt())
+            }, LinearLayout.LayoutParams(-1, -2))
+            return EditText(this).apply {
+                setText(valor)
+                textSize = 16f
+                setSingleLine(true)
+                inputType = if (senha) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                    else InputType.TYPE_CLASS_TEXT
+                hint = if (senha) "Senha" else "Usuário"
+                setSelectAllOnFocus(true)
+                conteudo.addView(this, LinearLayout.LayoutParams(-1, dp(50)).apply {
+                    bottomMargin = dp(8)
+                })
+            }
+        }
+        conteudo.addView(TextView(this).apply {
+            text = atualA.nome
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1D4ED8.toInt())
+        }, LinearLayout.LayoutParams(-1, -2))
+        val usuarioA = adicionarCampo("Usuário", atualA.usuario)
+        val senhaA = adicionarCampo("Senha", atualA.senha, senha = true)
+        conteudo.addView(TextView(this).apply {
+            text = atualB.nome
+            textSize = 18f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(0xFF1D4ED8.toInt())
+            setPadding(0, dp(8), 0, 0)
+        }, LinearLayout.LayoutParams(-1, -2))
+        val usuarioB = adicionarCampo("Usuário", atualB.usuario)
+        val senhaB = adicionarCampo("Senha", atualB.senha, senha = true)
+        val scroll = ScrollView(this).apply { addView(conteudo) }
+
+        val dialogo = AlertDialog.Builder(this)
+            .setTitle("Ajustes dos mercados")
+            .setView(scroll)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Guardar e reconectar", null)
+            .create()
+        dialogo.setOnShowListener {
+            dialogo.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val novoUsuarioA = usuarioA.text.toString().trim()
+                val novaSenhaA = senhaA.text.toString()
+                val novoUsuarioB = usuarioB.text.toString().trim()
+                val novaSenhaB = senhaB.text.toString()
+                if (novoUsuarioA.isBlank() || novaSenhaA.isBlank() ||
+                    novoUsuarioB.isBlank() || novaSenhaB.isBlank()) {
+                    Toast.makeText(this, "Preencha usuário e senha dos dois mercados.", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+                store.salvarA(atualA.copy(usuario = novoUsuarioA, senha = novaSenhaA))
+                store.salvarB(atualB.copy(usuario = novoUsuarioB, senha = novaSenhaB))
+                clientA = null
+                clientB = null
+                dialogo.dismiss()
+                conectarTudo()
+            }
+        }
+        dialogo.show()
+    }
+
+    private fun mensagemFalha(erro: Throwable?): String {
+        val msg = erro?.message?.replace(Regex("\\s+"), " ")?.take(90)
+        return msg?.takeIf { it.isNotBlank() } ?: "falha de login ou conexão"
+    }
+
+    private fun consultar(codigo: String, descricaoImagem: String? = null) {
         val limpo = codigo.trim()
         if (limpo.isEmpty()) return
         // Alguns teclados disparam ENTER + "pesquisar" juntos; ignora o duplo
@@ -212,24 +305,169 @@ class MainActivity : AppCompatActivity() {
         }
         txtStatus.text = "Consultando \"$limpo\" nos dois mercados..."
         btnScan.isEnabled = false
+        btnAjustes.isEnabled = false
         txtProduto.text = "Consultando..."
         precoA.text = "R$ -"
         precoB.text = "R$ -"
         btnSalvar.visibility = View.GONE
         ultimoItem = null
         imagemToken++
+        imagemBuscaEmAndamento = false
         mostrarImagem(null)
 
-        val latch = CountDownLatch(2)
-        var resA: Result<PriceLookupResult>? = null
-        var resB: Result<PriceLookupResult>? = null
-        pool.execute { resA = consultarSeguro(ca, store.mercadoA(), limpo); latch.countDown() }
-        pool.execute { resB = consultarSeguro(cb, store.mercadoB(), limpo); latch.countDown() }
-        latch.await(25, TimeUnit.SECONDS)
+        val idConsulta = ++consultaToken
+        // Inicia a fotografia em paralelo às consultas de preço. Assim, um
+        // mercado lento não atrasa a chegada da imagem do produto.
+        if (eanValido(limpo) || !descricaoImagem.isNullOrBlank()) {
+            buscarImagemProduto(limpo, descricaoImagem.orEmpty())
+        }
 
-        runOnUiThread {
-            btnScan.isEnabled = true
-            mostrarResultado(limpo, resA, resB)
+        // Cada falha fica limitada ao seu mercado; uma exceção imprevista num ramo
+        // não descarta o preço que o outro ramo eventualmente conseguiu consultar.
+        val consultaA = CompletableFuture.supplyAsync(
+            { consultarSeguro(ca, store.mercadoA(), limpo) }, pool
+        ).exceptionally { erro -> Result.failure(erro.cause ?: erro) }
+        val consultaB = CompletableFuture.supplyAsync(
+            { consultarSeguro(cb, store.mercadoB(), limpo) }, pool
+        ).exceptionally { erro -> Result.failure(erro.cause ?: erro) }
+        consultaA.thenCombine(consultaB) { resA, resB -> Pair(resA, resB) }
+            .whenComplete { resultados, erro ->
+                runOnUiThread {
+                    if (idConsulta != consultaToken || isFinishing || isDestroyed) return@runOnUiThread
+                    if (erro != null || resultados == null) {
+                        btnScan.isEnabled = true
+                        btnAjustes.isEnabled = true
+                        txtStatus.text = "Não foi possível consultar os mercados. Tente novamente."
+                        return@runOnUiThread
+                    }
+                    resolverAmbiguidades(limpo, resultados.first, resultados.second, idConsulta)
+                }
+            }
+    }
+
+    private fun resolverAmbiguidades(
+        codigo: String,
+        resA: Result<PriceLookupResult>?,
+        resB: Result<PriceLookupResult>?,
+        idConsulta: Int
+    ) {
+        if (idConsulta != consultaToken || isFinishing || isDestroyed) return
+        val ambiguoA = resA?.exceptionOrNull() as? AmbiguousProductException
+        val ambiguoB = resB?.exceptionOrNull() as? AmbiguousProductException
+        val produtoA = resA?.getOrNull()
+        val produtoB = resB?.getOrNull()
+        when {
+            ambiguoA != null -> mostrarEscolhaAmbigua(
+                store.mercadoA().nome, ambiguoA.products, idConsulta,
+                ambiguoA.searchWasByName,
+                aoCancelar = { mostrarResultado(codigo, resA, resB) }
+            ) { escolhido ->
+                consultarProdutoEscolhido(
+                    codigo, clientA, store.mercadoA(), escolhido, ambiguoA.searchWasByName, idConsulta
+                ) { resultado ->
+                    resolverAmbiguidades(codigo, resultado, resB, idConsulta)
+                }
+            }
+            ambiguoB != null -> mostrarEscolhaAmbigua(
+                store.mercadoB().nome, ambiguoB.products, idConsulta,
+                ambiguoB.searchWasByName,
+                aoCancelar = { mostrarResultado(codigo, resA, resB) }
+            ) { escolhido ->
+                consultarProdutoEscolhido(
+                    codigo, clientB, store.mercadoB(), escolhido, ambiguoB.searchWasByName, idConsulta
+                ) { resultado ->
+                    resolverAmbiguidades(codigo, resA, resultado, idConsulta)
+                }
+            }
+            resA?.exceptionOrNull() is ProductNotFoundException && produtoB != null ->
+                buscarFallbackDescricao(codigo, clientA, store.mercadoA(), produtoB.product.description, idConsulta) { fallback ->
+                    if (fallback.exceptionOrNull() is AmbiguousProductException) {
+                        resolverAmbiguidades(codigo, fallback, resB, idConsulta)
+                    } else {
+                        mostrarResultado(codigo, fallback, resB)
+                    }
+                }
+            resB?.exceptionOrNull() is ProductNotFoundException && produtoA != null ->
+                buscarFallbackDescricao(codigo, clientB, store.mercadoB(), produtoA.product.description, idConsulta) { fallback ->
+                    if (fallback.exceptionOrNull() is AmbiguousProductException) {
+                        resolverAmbiguidades(codigo, resA, fallback, idConsulta)
+                    } else {
+                        mostrarResultado(codigo, resA, fallback)
+                    }
+                }
+            else -> mostrarResultado(codigo, resA, resB)
+        }
+    }
+
+    private fun mostrarEscolhaAmbigua(
+        mercado: String,
+        candidatos: List<CartazProduct>,
+        idConsulta: Int,
+        porDescricao: Boolean,
+        aoCancelar: () -> Unit,
+        aoEscolher: (CartazProduct) -> Unit
+    ) {
+        val lista = candidatos
+        var resolvido = false
+        val linhas = lista.map { "${it.description}\nCód. ${it.code}" }.toTypedArray()
+        val dialogo = AlertDialog.Builder(this)
+            .setTitle("${if (porDescricao) "Confirme" else "Escolha"} no $mercado (${lista.size})")
+            .setItems(linhas) { _, indice ->
+                if (idConsulta == consultaToken && indice in lista.indices) {
+                    resolvido = true
+                    aoEscolher(lista[indice])
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialogo.setCanceledOnTouchOutside(false)
+        dialogo.setOnDismissListener {
+            if (!resolvido && idConsulta == consultaToken) {
+                aoCancelar()
+            }
+        }
+        txtStatus.text = if (porDescricao) {
+            "EAN não localizado em $mercado. Confirme marca, tipo e tamanho; a busca foi pelo nome."
+        } else {
+            "O $mercado retornou vários itens para este código. Escolha o correto para comparar."
+        }
+        dialogo.show()
+    }
+
+    private fun consultarProdutoEscolhido(
+        codigo: String,
+        client: CartazFacilClient?,
+        mercado: MercadoConfig,
+        produto: CartazProduct,
+        porDescricao: Boolean,
+        idConsulta: Int,
+        aoConcluir: (Result<PriceLookupResult>) -> Unit
+    ) {
+        txtStatus.text = "Consultando ${produto.description} em ${mercado.nome}..."
+        pool.execute {
+            val resultado = consultarSeguro(client, mercado, codigo, produto, porDescricao)
+            runOnUiThread {
+                if (idConsulta == consultaToken && !isFinishing && !isDestroyed) aoConcluir(resultado)
+            }
+        }
+    }
+
+    private fun buscarFallbackDescricao(
+        codigo: String,
+        client: CartazFacilClient?,
+        mercado: MercadoConfig,
+        descricaoEsperada: String,
+        idConsulta: Int,
+        aoConcluir: (Result<PriceLookupResult>) -> Unit
+    ) {
+        txtStatus.text = "EAN não localizado em ${mercado.nome}; tentando pelo nome do produto..."
+        pool.execute {
+            val resultado = consultarSeguro(
+                client, mercado, codigo, descricaoFallback = descricaoEsperada
+            )
+            runOnUiThread {
+                if (idConsulta == consultaToken && !isFinishing && !isDestroyed) aoConcluir(resultado)
+            }
         }
     }
 
@@ -238,6 +476,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Pesquisa tentando vários termos (setores: usa sinônimos até achar produtos). */
     private fun pesquisarComTermos(termos: List<String>) {
+        val idPesquisa = ++consultaToken
         val ca = clientA
         val cb = clientB
         if (ca == null && cb == null) {
@@ -255,14 +494,16 @@ class MainActivity : AppCompatActivity() {
                     ?.forEach { p -> achados.putIfAbsent(p.code, p.description) }
             }
             runOnUiThread {
+                if (idPesquisa != consultaToken || isFinishing || isDestroyed) return@runOnUiThread
                 txtStatus.text = "Conectado nos dois mercados. Escaneie um produto."
                 when {
                     achados.isEmpty() -> Toast.makeText(
                         this, "Nenhum produto encontrado nesse setor.", Toast.LENGTH_LONG).show()
                     achados.size == 1 -> {
                         val codigo = achados.keys.first()
+                        val descricao = achados.values.first()
                         edtCodigo.setText(codigo)
-                        consultar(codigo)
+                        consultar(codigo, descricao)
                     }
                     else -> mostrarEscolhaProduto(achados)
                 }
@@ -335,7 +576,7 @@ class MainActivity : AppCompatActivity() {
             tv.setOnClickListener {
                 dialog.dismiss()
                 edtCodigo.setText(codigo)
-                consultar(codigo)
+                consultar(codigo, descricao)
             }
             conteudo.addView(tv, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             val div = View(this)
@@ -364,28 +605,41 @@ class MainActivity : AppCompatActivity() {
      * Consulta com reconexão: se a sessão caiu (outro funcionário logou em outro PC),
      * faz login de novo e repete a consulta automaticamente.
      */
-    private fun consultarSeguro(client: CartazFacilClient?, cfg: MercadoConfig, codigo: String): Result<PriceLookupResult> {
+    private fun consultarSeguro(
+        client: CartazFacilClient?,
+        cfg: MercadoConfig,
+        codigo: String,
+        produtoSelecionado: CartazProduct? = null,
+        matchedByDescription: Boolean = false,
+        descricaoFallback: String? = null
+    ): Result<PriceLookupResult> {
         if (client == null) return Result.failure(RuntimeException("Mercado não conectado"))
-        val r1 = runCatching { client.lookupPrice(codigo) }
+        fun executarConsulta() = when {
+            produtoSelecionado != null -> client.lookupPriceForProduct(codigo, produtoSelecionado, matchedByDescription)
+            descricaoFallback != null -> throw AmbiguousProductException(
+                client.searchProductsByDescription(descricaoFallback), searchWasByName = true
+            )
+            else -> client.lookupPrice(codigo)
+        }
+        val r1 = runCatching { executarConsulta() }
         val err = r1.exceptionOrNull()
-        val sessaoCaiu = err is CartazLoginException ||
-            (err?.message?.contains("HTTP", ignoreCase = true) == true)
-        if (!sessaoCaiu) return r1
-        val relogin = runCatching { client.login(cfg.usuario, cfg.senha) }
-        return if (relogin.isSuccess) runCatching { client.lookupPrice(codigo) } else r1
-    }
+        if (err is CartazLoginException) {
+            val relogin = runCatching { client.login(cfg.usuario, cfg.senha) }
+            return if (relogin.isSuccess) runCatching { executarConsulta() } else r1
+        }
 
-    /** Mantém a sessão ativa: a cada poucos minutos refaz o login nos dois mercados,
-     *  garantindo que o app "ganhe" a disputa do duplo login. */
-    private fun iniciarKeepAlive() {
-        keepAlive.scheduleWithFixedDelay({
-            try {
-                val ma = store.mercadoA()
-                val mb = store.mercadoB()
-                clientA?.let { runCatching { it.login(ma.usuario, ma.senha) } }
-                clientB?.let { runCatching { it.login(mb.usuario, mb.senha) } }
-            } catch (_: Exception) { }
-        }, 2, 4, TimeUnit.MINUTES)
+        // Uma falha de rede/servidor não significa que o produto não exista.
+        // Repete só uma vez e não repete ProductNotFound/PriceNotFound.
+        val erroServidor5xx = err is CartazFacilException &&
+            Regex("\\b5\\d\\d\\b").containsMatchIn(err.message.orEmpty())
+        if (err !is IOException && !erroServidor5xx) return r1
+        try {
+            Thread.sleep(250)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return r1
+        }
+        return runCatching { executarConsulta() }
     }
 
     private fun mostrarResultado(codigo: String, resA: Result<PriceLookupResult>?, resB: Result<PriceLookupResult>?) {
@@ -438,9 +692,15 @@ class MainActivity : AppCompatActivity() {
                 val venc = if (precoValA <= precoValB) ma.nome else mb.nome
                 "Diferença de R$ ${fmt(dif)} — melhor preço: $venc"
             }
-            precoValA != null -> "Só ${ma.nome} tem este produto."
-            precoValB != null -> "Só ${mb.nome} tem este produto."
-            else -> "Preço indisponível nos dois mercados."
+            precoValA != null && resB?.exceptionOrNull() is ProductNotFoundException -> "Só ${ma.nome} encontrou este produto."
+            precoValB != null && resA?.exceptionOrNull() is ProductNotFoundException -> "Só ${mb.nome} encontrou este produto."
+            precoValA != null -> "Sem preço em ${mb.nome}: ${erroCurto(resB)}."
+            precoValB != null -> "Sem preço em ${ma.nome}: ${erroCurto(resA)}."
+            else -> "Sem preços — ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
+        }
+        val correspondenciaPorDescricao = okA?.matchedByDescription == true || okB?.matchedByDescription == true
+        if (correspondenciaPorDescricao) {
+            txtDiff.append("\nPreço localizado por descrição; confira marca, tipo e tamanho do produto.")
         }
 
         // Alerta de queda de preço (compara com o histórico local)
@@ -451,6 +711,7 @@ class MainActivity : AppCompatActivity() {
 
         // Grava o preço atual no histórico (para comparações futuras)
         val descHist = okA?.product?.description ?: okB?.product?.description ?: ""
+        if (imagemBuscaCodigo == codigo) imagemDescricaoAtual = descHist
         val agora = System.currentTimeMillis()
         if (okA != null) historicoStore.registrar(RegistroPreco(codigo, descHist, ma.nome, precoValA!!.toDouble(), agora))
         if (okB != null) historicoStore.registrar(RegistroPreco(codigo, descHist, mb.nome, precoValB!!.toDouble(), agora))
@@ -484,7 +745,11 @@ class MainActivity : AppCompatActivity() {
                     ?: codigo
             }
             if (imgAprendida != null) mostrarImagem(imgAprendida)
-            else buscarImagemProduto(eanImagem, descHist)
+            else if (imagemBuscaCodigo == eanImagem && imagemBuscaEmAndamento) {
+                // Mantém a procura iniciada no começo da consulta (EAN ou nome escolhido).
+            } else if (eanValido(codigo) && eanImagem == codigo && !ultimaImagem.isNullOrEmpty()) {
+                // A procura iniciada junto com os preços já encontrou e mostrou a foto.
+            } else buscarImagemProduto(eanImagem, descHist)
         }
 
 
@@ -511,7 +776,17 @@ class MainActivity : AppCompatActivity() {
         }
         btnSalvar.visibility = if (ultimoItem != null) View.VISIBLE else View.GONE
 
-        txtStatus.text = "Conectado nos dois mercados. Escaneie um produto."
+        val statusComparacao = when {
+            okA != null && okB != null -> "Preço comparado nos dois mercados. Escaneie outro produto."
+            okA != null -> "${ma.nome}: preço encontrado. ${mb.nome}: ${erroCurto(resB)}."
+            okB != null -> "${mb.nome}: preço encontrado. ${ma.nome}: ${erroCurto(resA)}."
+            else -> "Nenhum preço encontrado. ${ma.nome}: ${erroCurto(resA)}; ${mb.nome}: ${erroCurto(resB)}."
+        }
+        txtStatus.text = if (correspondenciaPorDescricao) {
+            "$statusComparacao Um produto foi confirmado pelo nome, não diretamente pelo EAN."
+        } else statusComparacao
+        btnScan.isEnabled = true
+        btnAjustes.isEnabled = true
     }
 
     private fun salvarNaLista() {
@@ -631,7 +906,7 @@ class MainActivity : AppCompatActivity() {
                 "&search_simple=1&action=process&json=1&page_size=5"
             val resp = org.jsoup.Jsoup.connect(url)
                 .userAgent("ComparaPreco/2.0 (consulta de precos pessoal)")
-                .timeout(9000)
+                .timeout(4500)
                 .ignoreContentType(true)
                 .execute()
             val arr = org.json.JSONObject(resp.body()).optJSONArray("products") ?: return null
@@ -666,62 +941,157 @@ class MainActivity : AppCompatActivity() {
      * tenta Open Food Facts por nome com filtro de similaridade. */
     private fun buscarImagemProduto(codigoBarras: String, descricao: String) {
         val token = ++imagemToken
+        imagemBuscaCodigo = codigoBarras
+        imagemDescricaoAtual = descricao
+        imagemBuscaEmAndamento = true
         val eanValido = codigoBarras.length in 8..14 && codigoBarras.all { it.isDigit() }
+
+        // Room consulta os metadados em background; os bytes reais são lidos de filesDir.
+        pool.execute {
+            val imagemLocal = runCatching { imageCache.findLocal(codigoBarras, descricao) }.getOrNull()
+            runOnUiThread {
+                if (token != imagemToken || isFinishing || isDestroyed) return@runOnUiThread
+                if (imagemLocal != null) {
+                    imagemBuscaEmAndamento = false
+                    mostrarImagem(imagemLocal.toURI().toString())
+                    return@runOnUiThread
+                }
+
+                // Compatibilidade com URLs guardadas por versões anteriores; promove-as a ficheiro local.
+                val imagemEmCache = if (eanValido) eanCache["P:$codigoBarras"] else null
+                if (!imagemEmCache.isNullOrBlank()) {
+                    imagemBuscaEmAndamento = false
+                    mostrarImagem(imagemEmCache)
+                    val ordemCache = imageCache.nextSelectionOrder()
+                    pool.execute {
+                        runCatching { imageCache.cacheRemote(codigoBarras, descricao, imagemEmCache, ordemCache) }
+                    }
+                    return@runOnUiThread
+                }
+                iniciarBuscaImagemRemota(token, codigoBarras, descricao, eanValido)
+            }
+        }
+    }
+
+    private fun iniciarBuscaImagemRemota(
+        token: Int,
+        codigoBarras: String,
+        descricao: String,
+        eanValido: Boolean
+    ) {
         if (!eanValido) {
             pool.execute {
                 val url = buscarImagemPorNome(descricao)
-                runOnUiThread { if (token == imagemToken) mostrarImagem(url) }
+                runOnUiThread {
+                    if (token == imagemToken) {
+                        imagemBuscaEmAndamento = false
+                        if (!url.isNullOrBlank()) guardarImagemAprendida(codigoBarras, descricao, url)
+                        mostrarImagem(url)
+                    }
+                }
             }
             return
         }
-        pool.execute {
-            // 1) Open Food Facts (API oficial, foto frontal do produto)
-            var imageUrl: String? = null
-            try {
-                val resp = org.jsoup.Jsoup
-                    .connect("https://world.openfoodfacts.org/api/v2/product/$codigoBarras.json")
-                    .userAgent("ComparaPreco/2.0 (consulta de precos pessoal)")
-                    .timeout(8000)
-                    .ignoreContentType(true)
-                    .execute()
-                val json = org.json.JSONObject(resp.body())
-                if (json.optInt("status") == 1) {
-                    val img = json.optJSONObject("product")?.optString("image_front_url")
-                    if (!img.isNullOrEmpty()) imageUrl = img
+
+        val melhorImagem = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val fontesConcluidas = java.util.concurrent.atomic.AtomicInteger(0)
+        // Consultar as duas fontes em paralelo: a mais rápida pode mostrar a foto
+        // sem esperar que a outra fonte lenta responda.
+        val fontes = listOf(
+            CompletableFuture.supplyAsync { buscarImagemOffPorEan(codigoBarras) },
+            CompletableFuture.supplyAsync { buscarImagemBeepScan(codigoBarras) }
+        )
+
+        fontes.forEachIndexed { indice, future ->
+            future.whenComplete { url, _ ->
+                if (!url.isNullOrBlank()) {
+                    val deveMostrar = if (indice == 0) {
+                        melhorImagem.set(url)
+                        true
+                    } else {
+                        melhorImagem.compareAndSet(null, url)
+                    }
+                    if (deveMostrar) runOnUiThread {
+                        if (token == imagemToken && melhorImagem.get() == url) {
+                            guardarImagemAprendida(codigoBarras, descricaoAtual(token, codigoBarras, descricao), url)
+                            imagemBuscaEmAndamento = false
+                            mostrarImagem(url)
+                        }
+                    }
                 }
-            } catch (e: Exception) { }
-            // 2) Fallback: BeepScan (produtos fora do Open Food Facts)
-            if (imageUrl == null) {
-                imageUrl = try {
-                    val document = org.jsoup.Jsoup.connect("https://www.beepscan.com/barcode/$codigoBarras")
-                        .userAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
-                        .timeout(8000)
-                        .get()
-                    document.selectFirst("meta[property=og:image]")?.attr("abs:content")
-                        ?.takeIf { it.startsWith("http") }
-                        ?: document.select("img[src]")
-                            .map { it.attr("abs:src") }
-                            .firstOrNull {
-                                it.startsWith("http") &&
-                                    !it.endsWith(".svg", ignoreCase = true) &&
-                                    !it.contains("logo", ignoreCase = true)
+
+                if (fontesConcluidas.incrementAndGet() == fontes.size && melhorImagem.get().isNullOrBlank()) {
+                    val descricaoProduto = descricaoAtual(token, codigoBarras, descricao)
+                    if (descricaoProduto.isBlank()) {
+                        runOnUiThread { if (token == imagemToken) imagemBuscaEmAndamento = false }
+                    } else {
+                        CompletableFuture.supplyAsync { buscarImagemPorNome(descricaoProduto) }
+                            .whenComplete { urlPorNome, _ ->
+                                runOnUiThread {
+                                    if (token == imagemToken) {
+                                        imagemBuscaEmAndamento = false
+                                        if (!urlPorNome.isNullOrBlank()) {
+                                            guardarImagemAprendida(codigoBarras, descricaoProduto, urlPorNome)
+                                        }
+                                        mostrarImagem(urlPorNome)
+                                    }
+                                }
                             }
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "Erro ao buscar imagem: ${e.message}")
-                    null
+                    }
                 }
             }
-            // Aprende: descrição normalizada -> EAN + URL da foto (vale p/ código interno e nome)
-            if (imageUrl != null && eanValido(codigoBarras)) {
-                val norm = normDesc(descricao)
-                if (norm.isNotEmpty()) {
-                    eanCache["N:$norm"] = codigoBarras
-                    eanCache["I:$norm"] = imageUrl
-                    salvarEanCache()
-                }
-            }
-            runOnUiThread { if (token == imagemToken) mostrarImagem(imageUrl) }
         }
+    }
+
+    private fun descricaoAtual(token: Int, codigoBarras: String, inicial: String): String =
+        if (token == imagemToken && codigoBarras == imagemBuscaCodigo) imagemDescricaoAtual.ifBlank { inicial }
+        else inicial
+
+    /** Guarda URL por EAN e por descrição no cache persistente já usado pelo app. */
+    private fun guardarImagemAprendida(codigoBarras: String, descricao: String, url: String) {
+        if (codigoBarras.length in 8..14 && codigoBarras.all { it.isDigit() }) {
+            eanCache["P:$codigoBarras"] = url
+        }
+        val norm = descricao.takeIf { it.isNotBlank() }?.let { normDesc(it) }.orEmpty()
+        if (norm.isNotEmpty()) {
+            eanCache["N:$norm"] = codigoBarras
+            eanCache["I:$norm"] = url
+        }
+        salvarEanCache()
+        val ordemCache = imageCache.nextSelectionOrder()
+        pool.execute { runCatching { imageCache.cacheRemote(codigoBarras, descricao, url, ordemCache) } }
+    }
+
+    private fun buscarImagemOffPorEan(codigoBarras: String): String? = try {
+        val resp = org.jsoup.Jsoup
+            .connect("https://world.openfoodfacts.org/api/v2/product/$codigoBarras.json")
+            .userAgent("ComparaPreco/2.0 (consulta de precos pessoal)")
+            .timeout(5000)
+            .ignoreContentType(true)
+            .execute()
+        val json = org.json.JSONObject(resp.body())
+        if (json.optInt("status") == 1) {
+            json.optJSONObject("product")?.optString("image_front_url")?.takeIf { it.startsWith("http") }
+        } else null
+    } catch (_: Exception) { null }
+
+    private fun buscarImagemBeepScan(codigoBarras: String): String? = try {
+        val document = org.jsoup.Jsoup.connect("https://www.beepscan.com/barcode/$codigoBarras")
+            .userAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
+            .timeout(5000)
+            .get()
+        document.selectFirst("meta[property=og:image]")?.attr("abs:content")
+            ?.takeIf { it.startsWith("http") }
+            ?: document.select("img[src]")
+                .map { it.attr("abs:src") }
+                .firstOrNull {
+                    it.startsWith("http") &&
+                        !it.endsWith(".svg", ignoreCase = true) &&
+                        !it.contains("logo", ignoreCase = true)
+                }
+    } catch (e: Exception) {
+        Log.w("MainActivity", "BeepScan sem foto para $codigoBarras: ${e.message}")
+        null
     }
 
     /** Foto com degradê estilo Netflix + fundo desfocado atrás. */
@@ -742,12 +1112,14 @@ class MainActivity : AppCompatActivity() {
         }
         Glide.with(this)
             .load(model)
+            .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.ALL)
             .error(R.drawable.ic_placeholder_box)
             .transform(NetflixEdgeTransformation.getTransformation())
             .into(imgProduto)
 
         Glide.with(this)
             .load(model)
+            .diskCacheStrategy(com.bumptech.glide.load.engine.DiskCacheStrategy.ALL)
             .override(24, 48)
             .transform(CenterCrop())
             .into(imgBackdrop)
@@ -757,7 +1129,12 @@ class MainActivity : AppCompatActivity() {
         r == null -> "Mercado não conectado"
         r.getOrNull() != null -> "R$ ${r.getOrNull()!!.price.display}"
         r.exceptionOrNull() is ProductNotFoundException -> "Não encontrado"
-        r.exceptionOrNull() is AmbiguousProductException -> "Mais de um produto"
+        r.exceptionOrNull() is AmbiguousProductException -> {
+            val ambiguidade = r.exceptionOrNull() as AmbiguousProductException
+            if (ambiguidade.searchWasByName) "Confirmação por nome pendente"
+            else "Escolha entre ${ambiguidade.products.size} itens"
+        }
+        r.exceptionOrNull() is PriceNotFoundException -> "Sem preço no mercado"
         r.exceptionOrNull() is CartazLoginException -> "Sessão expirou"
         else -> {
             val msg = r.exceptionOrNull()?.message ?: "sem detalhes"
@@ -857,7 +1234,6 @@ class MainActivity : AppCompatActivity() {
         soundPool?.release()
         soundPool = null
         pool.shutdownNow()
-        keepAlive.shutdownNow()
         super.onDestroy()
     }
 

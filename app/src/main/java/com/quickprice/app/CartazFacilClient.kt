@@ -4,16 +4,19 @@ import java.io.IOException
 import java.net.CookieManager
 import java.net.CookiePolicy
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.text.Normalizer
 import java.util.Locale
 import org.jsoup.Jsoup
 
 internal data class PriceLookupResult(
     val barcode: String,
     val product: CartazProduct,
-    val price: CartazPrice
+    val price: CartazPrice,
+    val matchedByDescription: Boolean = false
 )
 
 internal open class CartazFacilException(message: String) : Exception(message)
@@ -21,7 +24,11 @@ internal open class CartazLoginException(message: String) : CartazFacilException
 /** Usuário/senha recusados pelo site (só nesse caso a senha salva deve ser apagada). */
 internal class CartazBadCredentialsException(message: String) : CartazLoginException(message)
 internal class ProductNotFoundException : CartazFacilException("Produto não encontrado.")
-internal class AmbiguousProductException : CartazFacilException("O código encontrou mais de um produto. Confira no sistema.")
+internal class AmbiguousProductException(
+    val products: List<CartazProduct>,
+    val searchWasByName: Boolean = false
+) :
+    CartazFacilException("O código encontrou mais de um produto.")
 internal class PriceNotFoundException : CartazFacilException("O produto foi encontrado, mas não há valor disponível.")
 
 internal class CartazFacilClient(
@@ -32,6 +39,7 @@ internal class CartazFacilClient(
     private var authenticated = false
 
     @Throws(CartazFacilException::class)
+    @Synchronized
     fun login(username: String, password: String) {
         if (username.isBlank() || password.isBlank()) {
             throw CartazLoginException("Informe o usuário e a senha.")
@@ -77,6 +85,7 @@ internal class CartazFacilClient(
 
     @Throws(CartazFacilException::class)
     /** Busca produtos por código de barras ou nome (para a pesquisa por nome do app). */
+    @Synchronized
     fun searchProducts(term: String): List<CartazProduct> {
         if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
         val clean = term.trim()
@@ -87,26 +96,118 @@ internal class CartazFacilClient(
         return CartazFacilHtmlParser.parseProducts(search.body)
     }
 
+    @Synchronized
     fun lookupPrice(barcode: String): PriceLookupResult {
         if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
         val cleanBarcode = barcode.trim()
         if (cleanBarcode.isEmpty()) throw CartazFacilException("O leitor não retornou um código de barras.")
 
-        // A opção Todas Sessões usa uma sessão vazia na requisição que retorna os produtos.
-        val searchPath = "/inc/buscaProduto.php?buscaProd=${encode(cleanBarcode)}&sessao="
-        val search = request(searchPath, "POST", ByteArray(0), "$baseUrl/unitario.php", ajax = true)
-        requireAuthenticatedResponse(search)
-        val products = CartazFacilHtmlParser.parseProducts(search.body)
+        // Alguns cadastros guardam UPC-A como EAN-13 com zero inicial, ou o
+        // inverso. Tenta a representação alternativa antes de declarar ausência.
+        val searchTerms = when {
+            cleanBarcode.length == 12 -> listOf(cleanBarcode, "0$cleanBarcode")
+            cleanBarcode.length == 13 && cleanBarcode.startsWith('0') -> listOf(cleanBarcode, cleanBarcode.drop(1))
+            cleanBarcode.length == 8 -> listOfNotNull(cleanBarcode, expandUpcE(cleanBarcode))
+                .flatMap { code ->
+                    if (code.length == 13 && code.startsWith('0')) listOf(code, code.drop(1)) else listOf(code)
+                }
+            else -> listOf(cleanBarcode)
+        }.distinct()
+        var products = emptyList<CartazProduct>()
+        for (searchTerm in searchTerms) {
+            val searchPath = "/inc/buscaProduto.php?buscaProd=${encode(searchTerm)}&sessao="
+            val search = request(searchPath, "POST", ByteArray(0), "$baseUrl/unitario.php", ajax = true)
+            requireAuthenticatedResponse(search)
+            products = CartazFacilHtmlParser.parseProducts(search.body)
+            if (products.isNotEmpty()) break
+        }
         if (products.isEmpty()) throw ProductNotFoundException()
-        // Alguns servidores retornam variações/duplicatas do mesmo produto.
-        // Escolhe automaticamente: código exato primeiro, senão o primeiro da lista.
-        val product = products.firstOrNull { it.code == cleanBarcode } ?: products.first()
+        // Nunca associa um preço ao primeiro resultado aleatório da lista.
+        val product = products.firstOrNull { it.code in searchTerms }
+            ?: products.singleOrNull()
+            ?: throw AmbiguousProductException(products)
+        return consultarPreco(cleanBarcode, product)
+    }
+
+    @Synchronized
+    fun lookupPriceForProduct(
+        barcode: String,
+        product: CartazProduct,
+        matchedByDescription: Boolean = false
+    ): PriceLookupResult {
+        if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
+        val cleanBarcode = barcode.trim()
+        if (cleanBarcode.isEmpty()) throw CartazFacilException("O leitor não retornou um código de barras.")
+        return consultarPreco(cleanBarcode, product, matchedByDescription)
+    }
+
+    /** Fallback: reúne candidatos pelo nome conhecido no outro mercado quando o EAN não existe. */
+    @Synchronized
+    fun searchProductsByDescription(expectedDescription: String): List<CartazProduct> {
+        if (!authenticated) throw CartazLoginException("Faça o login antes de consultar preços.")
+
+        val cleanDescription = expectedDescription
+            .replace(Regex("(?i)\\s*[-|]\\s*(?:un\\s+)?familia.*$"), "")
+            .trim()
+        val tokens = cleanDescription.split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter { it.length > 1 && normalizeDescription(it) !in NAME_STOP_WORDS }
+        val searchTerms = listOf(
+            cleanDescription,
+            tokens.take(4).joinToString(" ")
+        ).map { it.trim() }.filter { it.length >= 3 }.distinct()
+
+        val found = linkedMapOf<String, CartazProduct>()
+        for (term in searchTerms) {
+            val matches = searchProducts(term)
+            matches.forEach { found[it.id] = it }
+        }
+        if (found.isEmpty()) throw ProductNotFoundException()
+
+        val expectedTokens = descriptionTokens(cleanDescription)
+        return found.values.map { product ->
+            product to descriptionSimilarity(expectedTokens, descriptionTokens(product.description))
+        }.sortedByDescending { it.second }.map { it.first }
+    }
+
+    private fun consultarPreco(
+        cleanBarcode: String,
+        product: CartazProduct,
+        matchedByDescription: Boolean = false
+    ): PriceLookupResult {
         val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
         val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
         requireAuthenticatedResponse(values)
         val prices = CartazFacilHtmlParser.parsePrices(values.body)
         val price = prices.firstOrNull() ?: throw PriceNotFoundException()
-        return PriceLookupResult(cleanBarcode, product, price)
+        return PriceLookupResult(cleanBarcode, product, price, matchedByDescription)
+    }
+
+    private fun descriptionTokens(text: String): Set<String> = normalizeDescription(text)
+        .split(Regex("[^a-z0-9]+"))
+        .filter { it.length > 1 && it !in NAME_STOP_WORDS }
+        .toSet()
+
+    private fun normalizeDescription(text: String): String = Normalizer.normalize(text, Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+
+    private fun descriptionSimilarity(expected: Set<String>, candidate: Set<String>): Double {
+        if (expected.isEmpty() || candidate.isEmpty()) return 0.0
+        return expected.intersect(candidate).size.toDouble() / maxOf(expected.size, candidate.size)
+    }
+
+    /** Expande UPC-E (8 dígitos) para UPC-A preservando o dígito verificador. */
+    private fun expandUpcE(code: String): String? {
+        if (code.length != 8 || !code.all { it.isDigit() } || code[0] !in '0'..'1') return null
+        val ns = code[0]
+        val digits = code.substring(1, 7)
+        val upcBody = when (digits[5]) {
+            '0', '1', '2' -> "$ns${digits[0]}${digits[1]}${digits[5]}0000${digits[2]}${digits[3]}${digits[4]}"
+            '3' -> "$ns${digits[0]}${digits[1]}${digits[2]}00000${digits[3]}${digits[4]}"
+            '4' -> "$ns${digits[0]}${digits[1]}${digits[2]}${digits[3]}00000${digits[4]}"
+            else -> "$ns${digits[0]}${digits[1]}${digits[2]}${digits[3]}${digits[4]}0000${digits[5]}"
+        }
+        return upcBody + code[7]
     }
 
     private fun requireAuthenticatedResponse(response: HttpResponse) {
@@ -134,7 +235,8 @@ internal class CartazFacilClient(
         var currentBody = body
 
         repeat(MAX_REDIRECTS + 1) {
-            val url = URL(currentUrl)
+            val uri = safeUri(currentUrl)
+            val url = uri.toURL()
             val requestBody = currentBody
             val connection = (url.openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = false
@@ -147,7 +249,7 @@ internal class CartazFacilClient(
                 if (!referer.isNullOrBlank()) setRequestProperty("Referer", referer)
                 if (ajax) setRequestProperty("X-Requested-With", "XMLHttpRequest")
 
-                cookieManager.get(url.toURI(), emptyMap()).forEach { (name, values) ->
+                cookieManager.get(uri, emptyMap()).forEach { (name, values) ->
                     if (name.equals("Cookie", ignoreCase = true) && values.isNotEmpty()) {
                         setRequestProperty("Cookie", values.joinToString("; "))
                     }
@@ -165,11 +267,11 @@ internal class CartazFacilClient(
             }
 
             val status = connection.responseCode
-            cookieManager.put(url.toURI(), connection.headerFields)
+            cookieManager.put(uri, connection.headerFields)
             if (status in 300..399) {
                 val location = connection.getHeaderField("Location")
                     ?: throw IOException("O sistema retornou uma resposta inválida.")
-                val nextUrl = URL(url, location)
+                val nextUrl = safeUri(URL(url, location).toExternalForm()).toURL()
                 val allowedHost = URL(baseUrl).host
                 if (!nextUrl.protocol.equals("https", ignoreCase = true) ||
                     !nextUrl.host.equals(allowedHost, ignoreCase = true)
@@ -199,11 +301,50 @@ internal class CartazFacilClient(
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 
+    /** Alguns redirects do Cartaz Fácil incluem espaços/caracteres não escapados na query. */
+    private fun safeUri(value: String): URI {
+        val parsed = URL(value)
+        val escapedPath = escapeUriComponent(parsed.path, "/:@!$&'()*+,;=")
+        val escapedQuery = parsed.query?.let { escapeUriComponent(it, "/?:@!$&'()*+,;=") }
+        val escapedFragment = parsed.ref?.let { escapeUriComponent(it, "/?:@!$&'()*+,;=") }
+        val normalized = buildString {
+            append(parsed.protocol).append("://").append(parsed.authority).append(escapedPath)
+            if (escapedQuery != null) append('?').append(escapedQuery)
+            if (escapedFragment != null) append('#').append(escapedFragment)
+        }
+        return URI(normalized)
+    }
+
+    private fun escapeUriComponent(value: String, allowed: String): String {
+        val out = StringBuilder()
+        var i = 0
+        while (i < value.length) {
+            val cp = value.codePointAt(i)
+            val chars = String(Character.toChars(cp))
+            if (cp == '%'.code && i + 2 < value.length &&
+                value[i + 1].digitToIntOrNull(16) != null && value[i + 2].digitToIntOrNull(16) != null) {
+                out.append(value, i, i + 3)
+                i += 3
+                continue
+            }
+            if (cp < 128 && (chars[0].isLetterOrDigit() || chars[0] in "-._~" || chars[0] in allowed)) {
+                out.append(chars)
+            } else {
+                chars.toByteArray(StandardCharsets.UTF_8).forEach { byte ->
+                    out.append('%').append("%02X".format(byte.toInt() and 0xFF))
+                }
+            }
+            i += Character.charCount(cp)
+        }
+        return out.toString()
+    }
+
     private data class HttpResponse(val statusCode: Int, val finalUrl: String, val body: String)
 
     companion object {
         private const val BASE_URL = "https://rmarket.cartazfacil.pro"
         private const val TIMEOUT_MS = 8_000
         private const val MAX_REDIRECTS = 5
+        private val NAME_STOP_WORDS = setOf("de", "do", "da", "dos", "das", "com", "un", "familia", "trad", "tradicional")
     }
 }

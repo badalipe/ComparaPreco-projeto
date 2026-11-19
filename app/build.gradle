@@ -1,6 +1,7 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.kapt'
     id 'com.google.gms.google-services'
 }
 
@@ -57,8 +58,9 @@ dependencies {
     implementation 'com.google.android.gms:play-services-code-scanner:16.1.0'
     implementation 'org.jsoup:jsoup:1.18.3'
 
-    // Image loading and database
-    implementation 'androidx.sqlite:sqlite:2.2.0'
+    // Room index for private on-device product image files
+    implementation 'androidx.room:room-runtime:2.6.1'
+    kapt 'androidx.room:room-compiler:2.6.1'
 
 
     testImplementation 'junit:junit:4.13.2'
