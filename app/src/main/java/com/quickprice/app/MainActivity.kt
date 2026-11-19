@@ -288,7 +288,7 @@ class MainActivity : AppCompatActivity() {
         return msg?.takeIf { it.isNotBlank() } ?: "falha de login ou conexão"
     }
 
-    private fun consultar(codigo: String) {
+    private fun consultar(codigo: String, descricaoImagem: String? = null) {
         val limpo = codigo.trim()
         if (limpo.isEmpty()) return
         // Alguns teclados disparam ENTER + "pesquisar" juntos; ignora o duplo
@@ -318,14 +318,18 @@ class MainActivity : AppCompatActivity() {
         val idConsulta = ++consultaToken
         // Inicia a fotografia em paralelo às consultas de preço. Assim, um
         // mercado lento não atrasa a chegada da imagem do produto.
-        if (eanValido(limpo)) buscarImagemProduto(limpo, "")
+        if (eanValido(limpo) || !descricaoImagem.isNullOrBlank()) {
+            buscarImagemProduto(limpo, descricaoImagem.orEmpty())
+        }
 
+        // Cada falha fica limitada ao seu mercado; uma exceção imprevista num ramo
+        // não descarta o preço que o outro ramo eventualmente conseguiu consultar.
         val consultaA = CompletableFuture.supplyAsync(
             { consultarSeguro(ca, store.mercadoA(), limpo) }, pool
-        )
+        ).exceptionally { erro -> Result.failure(erro.cause ?: erro) }
         val consultaB = CompletableFuture.supplyAsync(
             { consultarSeguro(cb, store.mercadoB(), limpo) }, pool
-        )
+        ).exceptionally { erro -> Result.failure(erro.cause ?: erro) }
         consultaA.thenCombine(consultaB) { resA, resB -> Pair(resA, resB) }
             .whenComplete { resultados, erro ->
                 runOnUiThread {
@@ -497,8 +501,9 @@ class MainActivity : AppCompatActivity() {
                         this, "Nenhum produto encontrado nesse setor.", Toast.LENGTH_LONG).show()
                     achados.size == 1 -> {
                         val codigo = achados.keys.first()
+                        val descricao = achados.values.first()
                         edtCodigo.setText(codigo)
-                        consultar(codigo)
+                        consultar(codigo, descricao)
                     }
                     else -> mostrarEscolhaProduto(achados)
                 }
@@ -571,7 +576,7 @@ class MainActivity : AppCompatActivity() {
             tv.setOnClickListener {
                 dialog.dismiss()
                 edtCodigo.setText(codigo)
-                consultar(codigo)
+                consultar(codigo, descricao)
             }
             conteudo.addView(tv, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             val div = View(this)
@@ -740,11 +745,10 @@ class MainActivity : AppCompatActivity() {
                     ?: codigo
             }
             if (imgAprendida != null) mostrarImagem(imgAprendida)
-            else if (eanValido(codigo) && eanImagem == codigo && !ultimaImagem.isNullOrEmpty()) {
-                // A busca iniciada junto com os preços já encontrou e mostrou a foto.
-            } else if (eanValido(codigo) && eanImagem == codigo &&
-                imagemBuscaCodigo == eanImagem && imagemBuscaEmAndamento) {
-                // Mantém a busca inicial; não a reinicia quando chegam os preços.
+            else if (imagemBuscaCodigo == eanImagem && imagemBuscaEmAndamento) {
+                // Mantém a procura iniciada no começo da consulta (EAN ou nome escolhido).
+            } else if (eanValido(codigo) && eanImagem == codigo && !ultimaImagem.isNullOrEmpty()) {
+                // A procura iniciada junto com os preços já encontrou e mostrou a foto.
             } else buscarImagemProduto(eanImagem, descHist)
         }
 
