@@ -28,6 +28,7 @@ class LockActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        EdgeToEdge.configure(this)
 
         val embutida = decodificar(BuildConfig.APP_PIN).ifEmpty { SENHA_PADRAO }
         val p = prefs()
@@ -47,6 +48,17 @@ class LockActivity : AppCompatActivity() {
         }
 
         setContentView(R.layout.activity_lock)
+        val root = findViewById<View>(R.id.lockRoot)
+        EdgeToEdge.applyInsets(root) { insets, imeInsets ->
+            val base = dp(32)
+            val bottom = maxOf(insets.bottom, imeInsets.bottom)
+            root.setPadding(
+                base + insets.left,
+                base + insets.top,
+                base + insets.right,
+                base + bottom
+            )
+        }
         edtSenha = findViewById(R.id.edtSenha)
         edtConfirma = findViewById(R.id.edtConfirma)
         txtErro = findViewById(R.id.txtErro)
@@ -107,4 +119,6 @@ class LockActivity : AppCompatActivity() {
         val b = Base64.decode(s, Base64.DEFAULT)
         return String(ByteArray(b.size) { (b[it].toInt() xor key[it % key.size].toInt()).toByte() }, Charsets.UTF_8)
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }

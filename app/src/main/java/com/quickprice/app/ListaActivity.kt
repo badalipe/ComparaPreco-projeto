@@ -28,16 +28,29 @@ class ListaActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        EdgeToEdge.configure(this)
         store = ListaComprasStore(this)
         histStore = HistoricoStore(this)
 
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(0xFF0A0F1F.toInt())
+            clipToPadding = false
+            isFillViewport = true
+        }
         container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(24), dp(20), dp(24))
         }
         scroll.addView(container)
         setContentView(scroll)
+        EdgeToEdge.applySystemInsets(scroll) { insets ->
+            container.setPadding(
+                dp(20) + insets.left,
+                dp(24) + insets.top,
+                dp(20) + insets.right,
+                dp(24) + insets.bottom
+            )
+        }
         montar()
     }
 

@@ -12,6 +12,7 @@ import android.view.ViewGroup
 import kotlin.math.abs
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.webkit.WebSettings
 import android.widget.Button
 import android.widget.EditText
@@ -26,7 +27,7 @@ import com.bumptech.glide.Glide
 import com.bumptech.glide.load.resource.bitmap.CenterCrop
 import java.math.BigDecimal
 import java.util.Locale
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -58,6 +59,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSalvar: View
     private lateinit var btnLista: Button
     private lateinit var btnVoz: View
+    private lateinit var rootContainer: View
+    private lateinit var mainContent: LinearLayout
+    private lateinit var mainScrollView: ScrollView
+    private lateinit var productImageFrame: View
+    private lateinit var txtCredito: TextView
+    private var lookupRequestId = 0
     private lateinit var listaStore: ListaComprasStore
     private lateinit var historicoStore: HistoricoStore
     private var ultimoItem: ItemLista? = null
@@ -82,6 +89,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        EdgeToEdge.configure(this)
         setContentView(R.layout.activity_main)
         store = MarketStore(this)
         eanCache = carregarEanCache()
@@ -128,6 +136,12 @@ class MainActivity : AppCompatActivity() {
         btnSalvar = findViewById(R.id.btnSalvar)
         btnLista = findViewById(R.id.btnLista)
         btnVoz = findViewById(R.id.btnVoz)
+        rootContainer = findViewById(R.id.rootContainer)
+        mainContent = findViewById(R.id.mainContent)
+        mainScrollView = findViewById(R.id.mainScrollView)
+        productImageFrame = findViewById(R.id.productImageFrame)
+        txtCredito = findViewById(R.id.txtCredito)
+        configurarInsetsEdgeToEdge()
         btnVoz.setOnClickListener { iniciarVoz() }
         listaStore = ListaComprasStore(this)
         historicoStore = HistoricoStore(this)
@@ -158,6 +172,33 @@ class MainActivity : AppCompatActivity() {
         conectarTudo()
         iniciarKeepAlive()
         verificarOfertasDoDia()
+    }
+
+    private fun configurarInsetsEdgeToEdge() {
+        val scanParams = btnScan.layoutParams as ViewGroup.MarginLayoutParams
+        val scanEnd = scanParams.marginEnd
+        val scanBottom = scanParams.bottomMargin
+        val saveParams = btnSalvar.layoutParams as ViewGroup.MarginLayoutParams
+        val saveEnd = saveParams.marginEnd
+        val saveBottom = saveParams.bottomMargin
+        val creditParams = txtCredito.layoutParams as ViewGroup.MarginLayoutParams
+        val creditBottom = creditParams.bottomMargin
+
+        EdgeToEdge.applyInsets(rootContainer) { insets, imeInsets ->
+            val contentBottom = maxOf(insets.bottom, imeInsets.bottom)
+            mainContent.setPadding(insets.left, insets.top, insets.right, contentBottom)
+
+            scanParams.marginEnd = scanEnd + insets.right
+            scanParams.bottomMargin = scanBottom + insets.bottom
+            btnScan.layoutParams = scanParams
+
+            saveParams.marginEnd = saveEnd + insets.right
+            saveParams.bottomMargin = saveBottom + insets.bottom
+            btnSalvar.layoutParams = saveParams
+
+            creditParams.bottomMargin = creditBottom + insets.bottom
+            txtCredito.layoutParams = creditParams
+        }
     }
 
     private fun aplicarLogo(img: ImageView, baseUrl: String) {
@@ -205,6 +246,8 @@ class MainActivity : AppCompatActivity() {
         if (limpo == ultimaConsulta && agora - ultimaConsultaHora < 1200) return
         ultimaConsulta = limpo
         ultimaConsultaHora = agora
+        val requestId = ++lookupRequestId
+        encerrarEntrada()
         if (!limpo.all { it.isDigit() }) { pesquisarPorNome(limpo); return }
         val ca = clientA
         val cb = clientB
@@ -222,17 +265,36 @@ class MainActivity : AppCompatActivity() {
         imagemToken++
         mostrarImagem(null)
 
-        val latch = CountDownLatch(2)
-        var resA: Result<PriceLookupResult>? = null
-        var resB: Result<PriceLookupResult>? = null
-        pool.execute { resA = consultarSeguro(ca, store.mercadoA(), limpo); latch.countDown() }
-        pool.execute { resB = consultarSeguro(cb, store.mercadoB(), limpo); latch.countDown() }
-        latch.await(25, TimeUnit.SECONDS)
+        val configA = store.mercadoA()
+        val configB = store.mercadoB()
+        val consultaA = CompletableFuture.supplyAsync(
+            { consultarSeguro(ca, configA, limpo) }, pool
+        )
+        val consultaB = CompletableFuture.supplyAsync(
+            { consultarSeguro(cb, configB, limpo) }, pool
+        )
+        consultaA.thenCombine(consultaB) { resA, resB -> resA to resB }
+            .whenComplete { resultados, erro ->
+                runOnUiThread {
+                    if (requestId != lookupRequestId || isFinishing || isDestroyed) return@runOnUiThread
+                    btnScan.isEnabled = true
+                    if (erro != null || resultados == null) {
+                        val causa = erro?.cause ?: erro ?: IllegalStateException("Falha ao consultar preços")
+                        val falha = Result.failure<PriceLookupResult>(causa)
+                        mostrarResultado(limpo, falha, falha)
+                    } else {
+                        mostrarResultado(limpo, resultados.first, resultados.second)
+                    }
+                }
+            }
+    }
 
-        runOnUiThread {
-            btnScan.isEnabled = true
-            mostrarResultado(limpo, resA, resB)
-        }
+    private fun encerrarEntrada() {
+        if (!::edtCodigo.isInitialized) return
+        val teclado = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        teclado?.hideSoftInputFromWindow(edtCodigo.windowToken, 0)
+        edtCodigo.clearFocus()
+        if (::rootContainer.isInitialized) rootContainer.requestFocus()
     }
 
     /** Pesquisa por nome: consulta os dois mercados e mostra lista pra escolher o produto. */
@@ -240,6 +302,8 @@ class MainActivity : AppCompatActivity() {
 
     /** Pesquisa tentando vários termos (setores: usa sinônimos até achar produtos). */
     private fun pesquisarComTermos(termos: List<String>) {
+        encerrarEntrada()
+        val requestId = ++lookupRequestId
         val ca = clientA
         val cb = clientB
         if (ca == null && cb == null) {
@@ -257,6 +321,7 @@ class MainActivity : AppCompatActivity() {
                     ?.forEach { p -> achados.putIfAbsent(p.code, p.description) }
             }
             runOnUiThread {
+                if (requestId != lookupRequestId || isFinishing || isDestroyed) return@runOnUiThread
                 txtStatus.text = "Conectado nos dois mercados. Escaneie um produto."
                 when {
                     achados.isEmpty() -> Toast.makeText(
@@ -514,6 +579,16 @@ class MainActivity : AppCompatActivity() {
         btnSalvar.visibility = if (ultimoItem != null) View.VISIBLE else View.GONE
 
         txtStatus.text = "Conectado nos dois mercados. Escaneie um produto."
+        if (okA != null || okB != null) enquadrarResultado()
+    }
+
+    private fun enquadrarResultado() {
+        mainScrollView.post {
+            val conteudo = mainScrollView.getChildAt(0) ?: return@post
+            val maxScroll = (conteudo.height - mainScrollView.height).coerceAtLeast(0)
+            val destino = (productImageFrame.top - dp(8)).coerceIn(0, maxScroll)
+            mainScrollView.smoothScrollTo(0, destino)
+        }
     }
 
     private fun salvarNaLista() {
