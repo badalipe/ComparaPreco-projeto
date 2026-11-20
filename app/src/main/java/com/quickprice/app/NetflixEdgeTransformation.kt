@@ -20,9 +20,9 @@ import java.security.MessageDigest
  * principalmente, embaixo, misturando com o fundo escuro do app.
  */
 class NetflixEdgeTransformation(
-    private val side: Float = 0.30f,
-    private val top: Float = 0.12f,
-    private val bottom: Float = 0.45f
+    private val side: Float = 0.18f,
+    private val top: Float = 0.08f,
+    private val bottom: Float = 0.34f
 ) : BitmapTransformation() {
 
     override fun transform(
@@ -106,7 +106,7 @@ class NetflixEdgeTransformation(
     }
 
     companion object {
-        private const val ID = "com.quickprice.app.NetflixEdgeTransformation.v2"
+        private const val ID = "com.quickprice.app.NetflixEdgeTransformation.v3"
 
         /** CenterInside + degradê nas bordas para preservar a foto inteira.
          *  A transformação explícita é necessária porque o Glide ignora o

@@ -84,14 +84,37 @@
                 android:visibility="gone" />
 
             <!-- Foto do produto -->
-            <ImageView
-                android:id="@+id/imgProduto"
+            <FrameLayout
+                android:id="@+id/productImageFrame"
                 android:layout_width="match_parent"
-                android:layout_height="230dp"
+                android:layout_height="280dp"
                 android:layout_marginTop="10dp"
-                android:contentDescription="Foto do produto"
-                android:scaleType="fitCenter"
-                android:src="@drawable/ic_placeholder_box" />
+                android:background="@drawable/bg_product_photo_panel"
+                android:clipToOutline="true">
+
+                <ImageView
+                    android:id="@+id/imgProdutoGlow"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:alpha="0.62"
+                    android:importantForAccessibility="no"
+                    android:scaleType="centerCrop" />
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/bg_product_photo_fade"
+                    android:importantForAccessibility="no" />
+
+                <ImageView
+                    android:id="@+id/imgProduto"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:contentDescription="Foto do produto"
+                    android:padding="6dp"
+                    android:scaleType="fitCenter"
+                    android:src="@drawable/ic_placeholder_box" />
+            </FrameLayout>
 
             <TextView
                 android:id="@+id/txtProduto"

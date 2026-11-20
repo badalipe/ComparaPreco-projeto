@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logoB: ImageView
     private lateinit var imgProduto: ImageView
     private lateinit var imgBackdrop: ImageView
+    private lateinit var imgProdutoGlow: ImageView
     private lateinit var edtCodigo: EditText
     private lateinit var btnScan: View
     private lateinit var btnSalvar: View
@@ -121,6 +122,7 @@ class MainActivity : AppCompatActivity() {
         logoB = findViewById(R.id.logoB)
         imgProduto = findViewById(R.id.imgProduto)
         imgBackdrop = findViewById(R.id.imgBackdrop)
+        imgProdutoGlow = findViewById(R.id.imgProdutoGlow)
         edtCodigo = findViewById(R.id.edtCodigo)
         btnScan = findViewById(R.id.btnScan)
         btnSalvar = findViewById(R.id.btnSalvar)
@@ -736,10 +738,22 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing || isDestroyed) return
         if (model.isNullOrEmpty()) {
             Glide.with(this).clear(imgBackdrop)
+            Glide.with(this).clear(imgProduto)
+            Glide.with(this).clear(imgProdutoGlow)
             imgBackdrop.setImageDrawable(null)
+            imgProdutoGlow.setImageDrawable(null)
             imgProduto.setImageResource(R.drawable.ic_placeholder_box)
             return
         }
+
+        // Versão baixa resolução da mesma foto: preenche o painel lateral como névoa,
+        // enquanto a imagem principal usa fitCenter para mostrar a embalagem inteira.
+        Glide.with(this)
+            .load(model)
+            .override(96, 96)
+            .transform(CenterCrop())
+            .into(imgProdutoGlow)
+
         Glide.with(this)
             .load(model)
             .error(R.drawable.ic_placeholder_box)
