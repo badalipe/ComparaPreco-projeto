@@ -1,0 +1,41 @@
+{
+  "version": 2,
+  "skills": {
+    "choosing-what-to-test": {
+      "source": "skydoves/android-testing-skills",
+      "ref": "8665ed59643c90eb1056a256a6ddec161aa1cfa1",
+      "commit": "8665ed59643c90eb1056a256a6ddec161aa1cfa1",
+      "sourceType": "github",
+      "skillPath": "fundamentals/concepts/choosing-what-to-test/SKILL.md",
+      "computedHash": "242fea790c1adcd26da048b1697d236536e680b67ea359421f7e5d3cd3ba4bbd",
+      "installMode": "copy"
+    },
+    "configuring-junit4-on-android": {
+      "source": "skydoves/android-testing-skills",
+      "ref": "8665ed59643c90eb1056a256a6ddec161aa1cfa1",
+      "commit": "8665ed59643c90eb1056a256a6ddec161aa1cfa1",
+      "sourceType": "github",
+      "skillPath": "jvm-tests/runner/configuring-junit4-on-android/SKILL.md",
+      "computedHash": "d114d3ccbdc534c53c2f0161b8d92511bb7c711ab9beba49bb18521c31ff47f6",
+      "installMode": "copy"
+    },
+    "find-skills": {
+      "source": "vercel-labs/skills",
+      "ref": "57217cf86ba38148a57af9e90d14a4c049558330",
+      "commit": "57217cf86ba38148a57af9e90d14a4c049558330",
+      "sourceType": "github",
+      "skillPath": "skills/find-skills/SKILL.md",
+      "computedHash": "7bc223e2aafbdbf6e50ea243ba6ef67fe432bb069ab439fea0390795dac0bf7f",
+      "installMode": "copy"
+    },
+    "verification-before-completion": {
+      "source": "obra/superpowers",
+      "ref": "22f0b463e7a5e579904dd6211a520321035526f7",
+      "commit": "22f0b463e7a5e579904dd6211a520321035526f7",
+      "sourceType": "github",
+      "skillPath": "skills/verification-before-completion/SKILL.md",
+      "computedHash": "09b0e3a4689c1c38a3b8fc6ef57a1d4165aa33c0013d546dbde9dd348941a319",
+      "installMode": "copy"
+    }
+  }
+}
