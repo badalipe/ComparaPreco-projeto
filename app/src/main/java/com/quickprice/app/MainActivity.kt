@@ -23,8 +23,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.bumptech.glide.Glide
-import com.bumptech.glide.load.resource.bitmap.CenterCrop
+import coil.load
+import coil.request.CachePolicy
+import coil.size.Scale
 import java.math.BigDecimal
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -435,11 +436,18 @@ class MainActivity : AppCompatActivity() {
         if (client == null) return Result.failure(RuntimeException("Mercado não conectado"))
         val r1 = runCatching { client.lookupPrice(codigo) }
         val err = r1.exceptionOrNull()
-        val sessaoCaiu = err is CartazLoginException ||
-            (err?.message?.contains("HTTP", ignoreCase = true) == true)
-        if (!sessaoCaiu) return r1
-        val relogin = runCatching { client.login(cfg.usuario, cfg.senha) }
-        return if (relogin.isSuccess) runCatching { client.lookupPrice(codigo) } else r1
+        if (err is CartazLoginException) {
+            val relogin = runCatching { client.login(cfg.usuario, cfg.senha) }
+            return if (relogin.isSuccess) runCatching { client.lookupPrice(codigo) } else r1
+        }
+        if (err !is CartazTransientException && err !is java.io.IOException) return r1
+        try {
+            Thread.sleep(350L)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return r1
+        }
+        return runCatching { client.lookupPrice(codigo) }
     }
 
     /** Mantém a sessão ativa: a cada poucos minutos refaz o login nos dois mercados,
@@ -541,6 +549,7 @@ class MainActivity : AppCompatActivity() {
             // Foto prioriza: imagem já aprendida por descrição > EAN digitado > EAN aprendido > busca por nome
             val normA = okA?.product?.description?.let { normDesc(it) }
             val normB = okB?.product?.description?.let { normDesc(it) }
+            val imagemCartaz = okB?.product?.imageUrl ?: okA?.product?.imageUrl
             val imgAprendida = normA?.let { eanCache["I:$it"] }
                 ?: normB?.let { eanCache["I:$it"] }
             val eanImagem = when {
@@ -550,8 +559,19 @@ class MainActivity : AppCompatActivity() {
                     ?: normB?.let { eanCache["N:$it"] }
                     ?: codigo
             }
-            if (imgAprendida != null) mostrarImagem(imgAprendida)
-            else buscarImagemProduto(eanImagem, descHist)
+            when {
+                !imagemCartaz.isNullOrBlank() -> {
+                    val norm = normA ?: normB
+                    if (!norm.isNullOrBlank()) {
+                        eanCache["I:$norm"] = imagemCartaz
+                        if (eanValido(codigo)) eanCache["N:$norm"] = codigo
+                        salvarEanCache()
+                    }
+                    mostrarImagem(imagemCartaz)
+                }
+                imgAprendida != null -> mostrarImagem(imgAprendida)
+                else -> buscarImagemProduto(eanImagem, descHist)
+            }
         }
 
 
@@ -812,9 +832,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (isFinishing || isDestroyed) return
         if (model.isNullOrEmpty()) {
-            Glide.with(this).clear(imgBackdrop)
-            Glide.with(this).clear(imgProduto)
-            Glide.with(this).clear(imgProdutoGlow)
+            imgBackdrop.load(null)
+            imgProduto.load(null)
+            imgProdutoGlow.load(null)
             imgBackdrop.setImageDrawable(null)
             imgProdutoGlow.setImageDrawable(null)
             imgProduto.setImageResource(R.drawable.ic_placeholder_box)
@@ -823,23 +843,27 @@ class MainActivity : AppCompatActivity() {
 
         // Versão baixa resolução da mesma foto: preenche o painel lateral como névoa,
         // enquanto a imagem principal usa fitCenter para mostrar a embalagem inteira.
-        Glide.with(this)
-            .load(model)
-            .override(96, 96)
-            .transform(CenterCrop())
-            .into(imgProdutoGlow)
-
-        Glide.with(this)
-            .load(model)
-            .error(R.drawable.ic_placeholder_box)
-            .transform(NetflixEdgeTransformation.getTransformation())
-            .into(imgProduto)
-
-        Glide.with(this)
-            .load(model)
-            .override(24, 48)
-            .transform(CenterCrop())
-            .into(imgBackdrop)
+        imgProdutoGlow.load(model) {
+            size(96, 96)
+            scale(Scale.FILL)
+            memoryCachePolicy(CachePolicy.ENABLED)
+            diskCachePolicy(CachePolicy.ENABLED)
+        }
+        imgProduto.load(model) {
+            scale(Scale.FIT)
+            transformations(NetflixEdgeTransformation())
+            placeholder(R.drawable.ic_placeholder_box)
+            error(R.drawable.ic_placeholder_box)
+            crossfade(true)
+            memoryCachePolicy(CachePolicy.ENABLED)
+            diskCachePolicy(CachePolicy.ENABLED)
+        }
+        imgBackdrop.load(model) {
+            size(24, 48)
+            scale(Scale.FILL)
+            memoryCachePolicy(CachePolicy.ENABLED)
+            diskCachePolicy(CachePolicy.ENABLED)
+        }
     }
 
     private fun erroCurto(r: Result<PriceLookupResult>?): String = when {

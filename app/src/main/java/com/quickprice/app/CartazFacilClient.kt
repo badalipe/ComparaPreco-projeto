@@ -23,6 +23,11 @@ internal class CartazBadCredentialsException(message: String) : CartazLoginExcep
 internal class ProductNotFoundException : CartazFacilException("Produto não encontrado.")
 internal class AmbiguousProductException : CartazFacilException("O código encontrou mais de um produto. Confira no sistema.")
 internal class PriceNotFoundException : CartazFacilException("O produto foi encontrado, mas não há valor disponível.")
+internal class CartazTransientException(message: String) : CartazFacilException(message)
+
+/** Prioriza o código exacto e remove IDs repetidos sem descartar uma correspondência exacta. */
+internal fun orderPriceCandidates(products: List<CartazProduct>, barcode: String): List<CartazProduct> =
+    products.sortedByDescending { it.code == barcode }.distinctBy { it.id }
 
 internal class CartazFacilClient(
     private val userAgent: String,
@@ -98,15 +103,19 @@ internal class CartazFacilClient(
         requireAuthenticatedResponse(search)
         val products = CartazFacilHtmlParser.parseProducts(search.body)
         if (products.isEmpty()) throw ProductNotFoundException()
-        // Alguns servidores retornam variações/duplicatas do mesmo produto.
-        // Escolhe automaticamente: código exato primeiro, senão o primeiro da lista.
-        val product = products.firstOrNull { it.code == cleanBarcode } ?: products.first()
-        val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
-        val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
-        requireAuthenticatedResponse(values)
-        val prices = CartazFacilHtmlParser.parsePrices(values.body)
-        val price = prices.firstOrNull() ?: throw PriceNotFoundException()
-        return PriceLookupResult(cleanBarcode, product, price)
+        // O Cartaz Fácil pode devolver duplicatas/variações do EAN. Uma delas pode não ter
+        // preço; tenta as correspondências seguintes em vez de parar na primeira.
+        val candidates = orderPriceCandidates(products, cleanBarcode).take(MAX_PRICE_CANDIDATES)
+        for (product in candidates) {
+            val valuesPath = "/inc/filtro_select.php?ref=valorProd&id_produto=${encode(product.id)}"
+            val values = request(valuesPath, "GET", referer = "$baseUrl/unitario.php", ajax = true)
+            // Alguns resultados antigos deixam de existir na consulta de valores; passa à próxima variação.
+            if (values.statusCode == 404) continue
+            requireAuthenticatedResponse(values)
+            val price = CartazFacilHtmlParser.parsePrices(values.body).firstOrNull()
+            if (price != null) return PriceLookupResult(cleanBarcode, product, price)
+        }
+        throw PriceNotFoundException()
     }
 
     private fun requireAuthenticatedResponse(response: HttpResponse) {
@@ -117,8 +126,11 @@ internal class CartazFacilClient(
             authenticated = false
             throw CartazLoginException("A sessão expirou. Entre novamente.")
         }
+        if (response.statusCode in 500..599) {
+            throw CartazTransientException("Falha temporária do servidor (HTTP ${response.statusCode}).")
+        }
         if (response.statusCode !in 200..299) {
-            throw CartazFacilException("O sistema respondeu com erro ${response.statusCode}.")
+            throw CartazFacilException("O sistema respondeu com HTTP ${response.statusCode}.")
         }
     }
 
@@ -205,5 +217,6 @@ internal class CartazFacilClient(
         private const val BASE_URL = "https://rmarket.cartazfacil.pro"
         private const val TIMEOUT_MS = 8_000
         private const val MAX_REDIRECTS = 5
+        private const val MAX_PRICE_CANDIDATES = 4
     }
 }

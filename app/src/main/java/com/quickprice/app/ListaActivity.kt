@@ -13,7 +13,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.bumptech.glide.Glide
+import coil.load
+import coil.request.CachePolicy
 import org.jsoup.Jsoup
 import java.util.concurrent.Executors
 import java.util.Locale
@@ -205,13 +206,23 @@ class ListaActivity : AppCompatActivity() {
 
     private fun carregarImagem(img: ImageView, barcode: String, urlSalva: String) {
         if (urlSalva.isNotEmpty()) {
-            Glide.with(this).load(urlSalva).error(R.drawable.ic_placeholder_box).into(img)
+            img.load(urlSalva) {
+                placeholder(R.drawable.ic_placeholder_box)
+                error(R.drawable.ic_placeholder_box)
+                memoryCachePolicy(CachePolicy.ENABLED)
+                diskCachePolicy(CachePolicy.ENABLED)
+            }
             return
         }
         img.setImageResource(R.drawable.ic_placeholder_box)
         if (barcode.isEmpty()) return
         cacheImg[barcode]?.let {
-            if (it.isNotEmpty()) Glide.with(this).load(it).error(R.drawable.ic_placeholder_box).into(img)
+            if (it.isNotEmpty()) img.load(it) {
+                placeholder(R.drawable.ic_placeholder_box)
+                error(R.drawable.ic_placeholder_box)
+                memoryCachePolicy(CachePolicy.ENABLED)
+                diskCachePolicy(CachePolicy.ENABLED)
+            }
             return
         }
         imgPool.execute {
@@ -248,8 +259,12 @@ class ListaActivity : AppCompatActivity() {
             if (url.isNotEmpty()) {
                 cacheImg[barcode] = url
                 runOnUiThread {
-                    Glide.with(this@ListaActivity).load(url)
-                        .error(R.drawable.ic_placeholder_box).into(img)
+                    if (!isFinishing && !isDestroyed) img.load(url) {
+                        placeholder(R.drawable.ic_placeholder_box)
+                        error(R.drawable.ic_placeholder_box)
+                        memoryCachePolicy(CachePolicy.ENABLED)
+                        diskCachePolicy(CachePolicy.ENABLED)
+                    }
                 }
             }
         }

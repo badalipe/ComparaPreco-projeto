@@ -8,12 +8,8 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
-import com.bumptech.glide.load.Transformation
-import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
-import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
-import com.bumptech.glide.load.resource.bitmap.CenterInside
-import com.bumptech.glide.load.MultiTransformation
-import java.security.MessageDigest
+import coil.size.Size
+import coil.transform.Transformation
 
 /**
  * Efeito "Netflix": a foto vai sumindo (degradê suave) nas laterais, em cima e,
@@ -23,22 +19,21 @@ class NetflixEdgeTransformation(
     private val side: Float = 0.18f,
     private val top: Float = 0.08f,
     private val bottom: Float = 0.34f
-) : BitmapTransformation() {
+) : Transformation {
 
-    override fun transform(
-        pool: BitmapPool,
-        toTransform: Bitmap,
-        outWidth: Int,
-        outHeight: Int
-    ): Bitmap {
-        val w = toTransform.width
-        val h = toTransform.height
-        val result = pool.get(w, h, Bitmap.Config.ARGB_8888)
-        result.setHasAlpha(true)
+    override val cacheKey: String = "$ID:$side:$top:$bottom"
+
+    override suspend fun transform(input: Bitmap, size: Size): Bitmap {
+        val w = input.width
+        val h = input.height
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            density = input.density
+            setHasAlpha(true)
+        }
 
         val canvas = Canvas(result)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-        canvas.drawBitmap(toTransform, 0f, 0f, null)
+        canvas.drawBitmap(input, 0f, 0f, null)
 
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -51,6 +46,8 @@ class NetflixEdgeTransformation(
         // Vertical: some em cima (leve) e embaixo (forte)
         paint.shader = gradient(0f, 0f, 0f, h.toFloat(), top, bottom)
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), paint)
+        paint.shader = null
+        paint.xfermode = null
 
         return result
     }
@@ -94,25 +91,7 @@ class NetflixEdgeTransformation(
     private fun smooth(t: Float) = t * t * (3f - 2f * t)
     private fun alpha(a: Float) = Color.argb((a * 255).toInt().coerceIn(0, 255), 0, 0, 0)
 
-    override fun equals(other: Any?) =
-        other is NetflixEdgeTransformation &&
-            other.side == side && other.top == top && other.bottom == bottom
-
-    override fun hashCode() = ID.hashCode() + (side * 100).toInt() * 31 +
-        (top * 100).toInt() * 17 + (bottom * 100).toInt()
-
-    override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-        messageDigest.update("$ID$side$top$bottom".toByteArray(Charsets.UTF_8))
-    }
-
     companion object {
-        private const val ID = "com.quickprice.app.NetflixEdgeTransformation.v3"
-
-        /** CenterInside + degradê nas bordas para preservar a foto inteira.
-         *  A transformação explícita é necessária porque o Glide ignora o
-         *  scaleType do ImageView quando há transform manual. */
-        @JvmStatic
-        fun getTransformation(): Transformation<Bitmap> =
-            MultiTransformation(CenterInside(), NetflixEdgeTransformation())
+        private const val ID = "com.quickprice.app.NetflixEdgeTransformation.coil.v1"
     }
 }
