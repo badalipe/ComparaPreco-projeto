@@ -91,7 +91,7 @@
             <FrameLayout
                 android:id="@+id/productImageFrame"
                 android:layout_width="match_parent"
-                android:layout_height="196dp"
+                android:layout_height="280dp"
                 android:layout_marginTop="10dp"
                 android:elevation="6dp"
                 android:background="@drawable/bg_product_photo_panel"
