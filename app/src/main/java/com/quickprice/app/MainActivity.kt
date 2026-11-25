@@ -1,6 +1,7 @@
 package com.quickprice.app
 
 import android.content.Intent
+import android.animation.ObjectAnimator
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.Bundle
@@ -9,6 +10,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewGroup
+import android.view.animation.AccelerateDecelerateInterpolator
 import kotlin.math.abs
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -23,6 +25,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import coil.dispose
 import coil.load
 import coil.request.CachePolicy
 import coil.size.Scale
@@ -30,6 +33,7 @@ import java.math.BigDecimal
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
@@ -64,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var mainContent: LinearLayout
     private lateinit var mainScrollView: ScrollView
     private lateinit var productImageFrame: View
+    private lateinit var imgSkeleton: View
     private lateinit var txtCredito: TextView
     private var lookupRequestId = 0
     private lateinit var listaStore: ListaComprasStore
@@ -81,6 +86,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var clientB: CartazFacilClient? = null
     @Volatile private var busyLogin = false
     @Volatile private var imagemToken = 0
+    @Volatile private var imageLookupFuture: Future<*>? = null
+    private val skeletonAnimations = mutableMapOf<View, ObjectAnimator>()
+    private val skeletonTexts = mutableMapOf<TextView, CharSequence>()
+    private val skeletonColors = mutableMapOf<TextView, android.content.res.ColorStateList>()
     private var soundPool: SoundPool? = null
     private var bipId = 0
     private var alertaId = 0
@@ -141,6 +150,7 @@ class MainActivity : AppCompatActivity() {
         mainContent = findViewById(R.id.mainContent)
         mainScrollView = findViewById(R.id.mainScrollView)
         productImageFrame = findViewById(R.id.productImageFrame)
+        imgSkeleton = findViewById(R.id.imgSkeleton)
         txtCredito = findViewById(R.id.txtCredito)
         configurarInsetsEdgeToEdge()
         btnVoz.setOnClickListener { iniciarVoz() }
@@ -239,6 +249,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Placeholder pulsante sem biblioteca externa: mantém a interface reativa durante a consulta. */
+    private fun iniciarSkeleton(view: View) {
+        view.visibility = View.VISIBLE
+        if (skeletonAnimations.containsKey(view)) return
+        val animator = ObjectAnimator.ofFloat(view, View.ALPHA, 0.38f, 0.82f).apply {
+            duration = 720L
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            repeatMode = ObjectAnimator.REVERSE
+            interpolator = AccelerateDecelerateInterpolator()
+        }
+        skeletonAnimations[view] = animator
+        animator.start()
+    }
+
+    private fun pararSkeleton(view: View) {
+        pararAnimacaoSkeleton(view)
+        view.visibility = View.GONE
+    }
+
+    private fun pararAnimacaoSkeleton(view: View) {
+        skeletonAnimations.remove(view)?.cancel()
+        view.alpha = 1f
+    }
+
+    private fun iniciarSkeletonDados() {
+        listOf(txtProduto, precoA, precoB).forEach { textView ->
+            skeletonTexts.putIfAbsent(textView, textView.text)
+            skeletonColors.putIfAbsent(textView, textView.textColors)
+            textView.text = "      "
+            textView.setTextColor(android.graphics.Color.TRANSPARENT)
+            textView.setBackgroundResource(R.drawable.bg_skeleton)
+            iniciarSkeleton(textView)
+        }
+    }
+
+    private fun pararSkeletonDados() {
+        listOf(txtProduto, precoA, precoB).forEach { textView ->
+            pararAnimacaoSkeleton(textView)
+            textView.background = null
+            skeletonColors.remove(textView)?.let(textView::setTextColor)
+            skeletonTexts.remove(textView)?.let { textView.text = it }
+        }
+    }
+
+    private fun cancelarBuscaImagem() {
+        imagemToken++
+        imageLookupFuture?.cancel(true)
+        imageLookupFuture = null
+        if (::imgProduto.isInitialized) imgProduto.dispose()
+        if (::imgProdutoGlow.isInitialized) imgProdutoGlow.dispose()
+        if (::imgBackdrop.isInitialized) imgBackdrop.dispose()
+    }
+
     private fun consultar(codigo: String) {
         val limpo = codigo.trim()
         if (limpo.isEmpty()) return
@@ -248,6 +311,7 @@ class MainActivity : AppCompatActivity() {
         ultimaConsulta = limpo
         ultimaConsultaHora = agora
         val requestId = ++lookupRequestId
+        cancelarBuscaImagem()
         encerrarEntrada()
         if (!limpo.all { it.isDigit() }) { pesquisarPorNome(limpo); return }
         val ca = clientA
@@ -258,13 +322,11 @@ class MainActivity : AppCompatActivity() {
         }
         txtStatus.text = "Consultando \"$limpo\" nos dois mercados..."
         btnScan.isEnabled = false
-        txtProduto.text = "Consultando..."
-        precoA.text = "R$ -"
-        precoB.text = "R$ -"
+        iniciarSkeletonDados()
+        iniciarSkeleton(imgSkeleton)
         btnSalvar.visibility = View.GONE
         ultimoItem = null
-        imagemToken++
-        mostrarImagem(null)
+        txtDiff.text = ""
 
         val configA = store.mercadoA()
         val configB = store.mercadoB()
@@ -303,6 +365,8 @@ class MainActivity : AppCompatActivity() {
 
     /** Pesquisa tentando vários termos (setores: usa sinônimos até achar produtos). */
     private fun pesquisarComTermos(termos: List<String>) {
+        cancelarBuscaImagem()
+        pararSkeleton(imgSkeleton)
         encerrarEntrada()
         val requestId = ++lookupRequestId
         val ca = clientA
@@ -464,6 +528,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun mostrarResultado(codigo: String, resA: Result<PriceLookupResult>?, resB: Result<PriceLookupResult>?) {
+        pararSkeletonDados()
         val ma = store.mercadoA()
         val mb = store.mercadoB()
 
@@ -491,6 +556,7 @@ class MainActivity : AppCompatActivity() {
 
         nomeA.text = top.nome
         precoA.text = top.precoTxt
+        precoA.setTextColor(if (top.valor != null) 0xFF4ADE80.toInt() else 0xFFD7DBEA.toInt())
         nomeB.text = bottom.nome
         precoB.text = bottom.precoTxt
 
@@ -500,7 +566,9 @@ class MainActivity : AppCompatActivity() {
         aplicarLogo(logoA, urlTop)
         aplicarLogo(logoB, urlBottom)
 
-        cardA.setBackgroundResource(R.drawable.bg_card_vencedor)
+        cardA.setBackgroundResource(
+            if (top.valor != null) R.drawable.bg_card_vencedor else R.drawable.bg_card_normal
+        )
         seloA.visibility = if (top.valor != null) View.VISIBLE else View.INVISIBLE
         seloA.text = if (soUm) "ÚNICO PREÇO" else "★ MENOR PREÇO"
 
@@ -765,13 +833,13 @@ class MainActivity : AppCompatActivity() {
         val token = ++imagemToken
         val eanValido = codigoBarras.length in 8..14 && codigoBarras.all { it.isDigit() }
         if (!eanValido) {
-            pool.execute {
+            imageLookupFuture = pool.submit {
                 val url = buscarImagemPorNome(descricao)
                 runOnUiThread { if (token == imagemToken) mostrarImagem(url) }
             }
             return
         }
-        pool.execute {
+        imageLookupFuture = pool.submit {
             // 1) Open Food Facts (API oficial, foto frontal do produto)
             var imageUrl: String? = null
             try {
@@ -788,7 +856,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) { }
             // 2) Fallback: BeepScan (produtos fora do Open Food Facts)
-            if (imageUrl == null) {
+            if (imageUrl == null && !Thread.currentThread().isInterrupted) {
                 imageUrl = try {
                     val document = org.jsoup.Jsoup.connect("https://www.beepscan.com/barcode/$codigoBarras")
                         .userAgent("Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
@@ -808,6 +876,7 @@ class MainActivity : AppCompatActivity() {
                     null
                 }
             }
+            if (Thread.currentThread().isInterrupted) return@submit
             // Aprende: descrição normalizada -> EAN + URL da foto (vale p/ código interno e nome)
             if (imageUrl != null && eanValido(codigoBarras)) {
                 val norm = normDesc(descricao)
@@ -832,6 +901,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (isFinishing || isDestroyed) return
         if (model.isNullOrEmpty()) {
+            pararSkeleton(imgSkeleton)
             imgBackdrop.load(null)
             imgProduto.load(null)
             imgProdutoGlow.load(null)
@@ -840,6 +910,8 @@ class MainActivity : AppCompatActivity() {
             imgProduto.setImageResource(R.drawable.ic_placeholder_box)
             return
         }
+        val token = imagemToken
+        iniciarSkeleton(imgSkeleton)
 
         // Versão baixa resolução da mesma foto: preenche o painel lateral como névoa,
         // enquanto a imagem principal usa fitCenter para mostrar a embalagem inteira.
@@ -852,11 +924,15 @@ class MainActivity : AppCompatActivity() {
         imgProduto.load(model) {
             scale(Scale.FIT)
             transformations(NetflixEdgeTransformation())
-            placeholder(R.drawable.ic_placeholder_box)
             error(R.drawable.ic_placeholder_box)
-            crossfade(true)
+            crossfade(220)
             memoryCachePolicy(CachePolicy.ENABLED)
             diskCachePolicy(CachePolicy.ENABLED)
+            listener(
+                onSuccess = { _, _ -> runOnUiThread { if (token == imagemToken) pararSkeleton(imgSkeleton) } },
+                onError = { _, _ -> runOnUiThread { if (token == imagemToken) pararSkeleton(imgSkeleton) } },
+                onCancel = { runOnUiThread { if (token == imagemToken) pararSkeleton(imgSkeleton) } }
+            )
         }
         imgBackdrop.load(model) {
             size(24, 48)
@@ -967,6 +1043,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        cancelarBuscaImagem()
+        skeletonAnimations.values.toList().forEach { it.cancel() }
+        skeletonAnimations.clear()
         soundPool?.release()
         soundPool = null
         pool.shutdownNow()

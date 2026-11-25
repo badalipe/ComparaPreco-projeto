@@ -91,8 +91,9 @@
             <FrameLayout
                 android:id="@+id/productImageFrame"
                 android:layout_width="match_parent"
-                android:layout_height="280dp"
+                android:layout_height="196dp"
                 android:layout_marginTop="10dp"
+                android:elevation="6dp"
                 android:background="@drawable/bg_product_photo_panel"
                 android:clipToOutline="true">
 
@@ -118,6 +119,13 @@
                     android:padding="6dp"
                     android:scaleType="fitCenter"
                     android:src="@drawable/ic_placeholder_box" />
+
+                <View
+                    android:id="@+id/imgSkeleton"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:background="@drawable/bg_skeleton"
+                    android:visibility="gone" />
             </FrameLayout>
 
             <TextView
@@ -147,7 +155,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="18dp"
-                android:background="@drawable/bg_card_vencedor"
+                android:background="@drawable/bg_card_normal"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
                 android:padding="16dp">
@@ -202,7 +210,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:text="R$ -"
-                        android:textColor="#FFFFFF"
+                        android:textColor="#D7DBEA"
                         android:textSize="30sp"
                         android:textStyle="bold" />
                 </LinearLayout>
@@ -282,7 +290,7 @@
                 android:layout_marginTop="16dp"
                 android:gravity="center"
                 android:text=""
-                android:textColor="#4ADE80"
+                android:textColor="#AAB4CE"
                 android:textSize="15sp"
                 android:textStyle="bold" />
 
@@ -334,7 +342,7 @@
         android:visibility="gone"
         android:contentDescription="Salvar na lista de compras"
         app:srcCompat="@drawable/ic_cart_24"
-        app:backgroundTint="#FF16A34A"
+        app:backgroundTint="#FF334155"
         app:tint="#FFFFFF"
         app:fabSize="mini" />
 
