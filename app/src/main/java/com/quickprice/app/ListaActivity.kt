@@ -23,7 +23,9 @@ class ListaActivity : AppCompatActivity() {
 
     private lateinit var store: ListaComprasStore
     private lateinit var histStore: HistoricoStore
+    private lateinit var root: LinearLayout
     private lateinit var container: LinearLayout
+    private lateinit var footer: LinearLayout
     private val imgPool = Executors.newSingleThreadExecutor()
     private val cacheImg = HashMap<String, String?>()
 
@@ -33,31 +35,47 @@ class ListaActivity : AppCompatActivity() {
         store = ListaComprasStore(this)
         histStore = HistoricoStore(this)
 
-        val scroll = ScrollView(this).apply {
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFF0A0F1F.toInt())
+        }
+        val scroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
             clipToPadding = false
             isFillViewport = true
         }
         container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(24), dp(20), dp(24))
+            setPadding(dp(20), dp(24), dp(20), dp(20))
         }
         scroll.addView(container)
-        setContentView(scroll)
-        EdgeToEdge.applySystemInsets(scroll) { insets ->
-            container.setPadding(
-                dp(20) + insets.left,
-                dp(24) + insets.top,
-                dp(20) + insets.right,
-                dp(24) + insets.bottom
-            )
+        footer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(R.drawable.bg_cart_footer)
+            elevation = dp(14).toFloat()
+            setPadding(dp(16), dp(12), dp(16), dp(12))
+            visibility = android.view.View.GONE
+        }
+        root.addView(scroll)
+        root.addView(footer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        setContentView(root)
+        EdgeToEdge.applyInsets(root) { insets, imeInsets ->
+            root.setPadding(insets.left, insets.top, insets.right, 0)
+            val bottom = maxOf(insets.bottom, imeInsets.bottom)
+            footer.setPadding(dp(16), dp(12), dp(16), dp(12) + bottom)
         }
         montar()
     }
 
     private fun montar() {
         container.removeAllViews()
+        footer.removeAllViews()
         val itens = store.todos()
+        montarFooter(itens)
 
         container.addView(TextView(this).apply {
             text = "🛒 LISTA DE COMPRAS"
@@ -92,23 +110,6 @@ class ListaActivity : AppCompatActivity() {
             })
         }
 
-        container.addView(TextView(this).apply {
-            text = "\n💰 ECONOMIA TOTAL: ${moeda(store.economiaTotal())}"
-            setTextColor(0xFF4ADE80.toInt())
-            textSize = 19f
-        })
-
-        val btnEnviar = Button(this).apply {
-            text = "Enviar lista no WhatsApp"
-            setTextColor(Color.WHITE)
-            textSize = 15f
-            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF25D366.toInt())
-            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_whatsapp_24, 0, 0, 0)
-            compoundDrawablePadding = dp(10)
-            setOnClickListener { enviarLista() }
-        }
-        container.addView(btnEnviar, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-
         val btnLimpar = Button(this).apply {
             text = "🗑 Limpar lista"
             setOnClickListener {
@@ -119,6 +120,64 @@ class ListaActivity : AppCompatActivity() {
         }
         container.addView(btnLimpar, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
+
+    /** Resumo e partilha ficam fixos abaixo da lista, disponíveis mesmo com muitos produtos. */
+    private fun montarFooter(itens: List<ItemLista>) {
+        if (itens.isEmpty()) {
+            footer.visibility = android.view.View.GONE
+            return
+        }
+        footer.visibility = android.view.View.VISIBLE
+
+        val resumo = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(2), dp(4), dp(14))
+        }
+        resumo.addView(colunaResumo(
+            "TOTAL GERAL", moeda(store.totalGeral()), Color.WHITE
+        ), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        resumo.addView(colunaResumo(
+            "ECONOMIA TOTAL", moeda(store.economiaTotal()), 0xFF4ADE80.toInt()
+        ), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        footer.addView(resumo)
+
+        val btnEnviar = Button(this).apply {
+            text = "Enviar Lista via WhatsApp"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            backgroundTintList = android.content.res.ColorStateList.valueOf(0xFF16A34A.toInt())
+            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_whatsapp_24, 0, 0, 0)
+            compoundDrawablePadding = dp(10)
+            contentDescription = "Enviar a lista de compras via WhatsApp"
+            setOnClickListener { enviarLista() }
+        }
+        footer.addView(btnEnviar, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(56)
+        ))
+    }
+
+    private fun colunaResumo(rotulo: String, valor: String, cor: Int): LinearLayout =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val label = TextView(this@ListaActivity).apply {
+                text = rotulo
+                setTextColor(0xFF9AA4BF.toInt())
+                textSize = 11f
+                letterSpacing = 0.06f
+            }
+            val amount = TextView(this@ListaActivity).apply {
+                text = valor
+                setTextColor(cor)
+                textSize = 19f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                maxLines = 1
+            }
+            addView(label)
+            addView(amount)
+        }
 
     private fun linha(item: ItemLista, index: Int): LinearLayout {
         val linha = LinearLayout(this).apply {

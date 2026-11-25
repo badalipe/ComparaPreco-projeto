@@ -28,6 +28,9 @@
             android:windowSoftInputMode="adjustResize" />
 
         <activity android:name=".ScannerActivity" android:exported="false" />
-        <activity android:name=".ListaActivity" android:exported="false" />
+        <activity
+            android:name=".ListaActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>
